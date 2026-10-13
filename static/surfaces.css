@@ -40,8 +40,7 @@
   .model-picker select,
   .reader-paper-chat > select,
   .paper-chat-compose,
-  .sort-row,
-  .reader-mode-switch
+  .sort-row
 ) {
   border-radius: var(--radius-control) !important;
 }
@@ -52,8 +51,7 @@
 .filter-menu-option {
   border-radius: calc(var(--radius-menu) - 0.65rem) !important;
 }
-.sort-row button,
-.reader-mode-switch .button {
+.sort-row button {
   border-radius: calc(var(--radius-control) - 0.25rem) !important;
 }
 :is(
@@ -158,8 +156,6 @@
     .paper-chat-compose,
     .sort-row,
     .sort-row button,
-    .reader-mode-switch,
-    .reader-mode-switch .button,
     .nav-count,
     .rank-badge,
     .journal-badge,
@@ -251,8 +247,14 @@ html {
   scrollbar-gutter: stable;
   overflow-x: clip;
 }
-body:has(#settings-dialog[open]) {
+/* Native modal dialogs make the background inert, but do not lock scrolling.
+   Track all open dialogs so nested windows and Escape close stay consistent. */
+html:has(dialog[open]),
+body:has(dialog[open]) {
   overflow: hidden;
+}
+dialog {
+  overscroll-behavior: contain;
 }
 #settings-dialog:has(#settings-panel-journals:not([hidden])) {
   height: calc(100dvh - 40px);
@@ -1096,8 +1098,8 @@ body:has(#settings-dialog[open]) {
   background: transparent !important;
   border: 0;
   box-shadow: none;
-  padding: 5px 0;
-  margin: 0 0 12px;
+  padding: calc(5px * var(--reader-content-scale, 1)) 0;
+  margin: 0 0 calc(12px * var(--reader-content-scale, 1));
   border-radius: 0;
   cursor: text;
 }

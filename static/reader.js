@@ -6,15 +6,14 @@ const readerRuntime = {
   leftFrame: 0, rightFrame: 0, suppressLeftUntil: 0, suppressRightUntil: 0,
   opening: 0, request: 0, mountedId: null, boundDialog: null,
   originalSignature: "", blockSignatures: new Map(), structureSignature: "", entriesBySource: new Map(), resizeAnchor: null, translationAnchor: null,
-  thumbsOpen: false, mode: "parallel", split: .5, position: null,
+  thumbsOpen: false, split: .5, position: null,
   savedSignature: "", savePromise: null, closePromise: null,
   notes: null, editor: null, libraryAnchor: null, lifecycleBound: false,
   layoutFrame: 0, restoring: false, splitSaveTimer: null,
-  textLanguage: "auto"
+  textLanguage: "auto", chromeCollapsed: false
 };
 
-const READER_ZOOMS = [75, 100, 125, 150, 200];
-const READER_MODES = ["parallel", "original", "translation"];
+const READER_ZOOMS = [40, 50, 60, 75, 100, 125, 150, 200];
 function readerClamp(value, low, high, fallback = low) {
   const number = Number(value); return Number.isFinite(number) ? Math.max(low, Math.min(high, number)) : fallback;
 }
@@ -25,8 +24,7 @@ function readerNormalizePosition(value, paper = state.reader) {
     original_offset: readerClamp(v.original_offset, 0, 1), translation_block_id: block?.id || null,
     translation_offset: readerClamp(v.translation_offset, 0, 1),
     zoom: READER_ZOOMS.includes(zoom) ? zoom : "fit",
-    split_ratio: readerClamp(v.split_ratio ?? state.settings.reader_split_ratio, .3, .7, .5),
-    mode: READER_MODES.includes(v.mode) ? v.mode : "parallel" };
+    split_ratio: readerClamp(v.split_ratio ?? state.settings.reader_split_ratio, .3, .7, .5) };
 }
 function readerStorageKey(kind, id) { return `ezread-reader-${kind}:${id}`; }
 function readerReadLocal(kind, id) {
@@ -42,15 +40,15 @@ function readerSaveHint(message) { const node = $("#reader-save-state"); if (nod
 function readerCapturePosition() {
   if (!state.reader) return null;
   const previous = readerRuntime.position || readerNormalizePosition(state.reader.reader_state);
-  const left = readerRuntime.mode !== "translation" ? readerCaptureAnchor($("#original-scroll"), ".reader-page-section") : null;
-  const right = readerRuntime.mode !== "original" ? readerCaptureAnchor($("#translation-scroll"), ".translation-block") : null;
+  const left = readerCaptureAnchor($("#original-scroll"), ".reader-page-section");
+  const right = readerCaptureAnchor($("#translation-scroll"), ".translation-block");
   const block = right?.key && state.reader.blocks.find(b => b.id === right.key);
   const page = left?.key ? Number(left.key) : block?.page || previous.page;
   const position = readerNormalizePosition({ ...previous, page,
     original_offset: left?.key ? left.ratio : page === previous.page ? previous.original_offset : 0,
     translation_block_id: right?.key || previous.translation_block_id,
     translation_offset: right?.key ? right.ratio : previous.translation_offset,
-    zoom: state.zoom, split_ratio: readerRuntime.split, mode: readerRuntime.mode });
+    zoom: state.zoom, split_ratio: readerRuntime.split });
   readerRuntime.position = position;
   return position;
 }
@@ -65,11 +63,9 @@ function readerRestorePosition(position) {
   const p = readerNormalizePosition(position); readerRuntime.restoring = true;
   const original = $("#original-scroll"), translated = $("#translation-scroll");
   const page = readerOriginalPage(p.page); readerLoadImage(page && $("img", page));
-  if (readerRuntime.mode !== "translation") readerRestoreAnchor(original, ".reader-page-section", { key: String(p.page), ratio: p.original_offset, offset: 0, scrollTop: 0, scrollLeft: 0 });
-  if (readerRuntime.mode !== "original") {
-    if (p.translation_block_id) readerRestoreAnchor(translated, ".translation-block", { key: p.translation_block_id, ratio: p.translation_offset, offset: 0, scrollTop: 0, scrollLeft: 0 });
-    else scrollTranslationToPage(p.page);
-  }
+  readerRestoreAnchor(original, ".reader-page-section", { key: String(p.page), ratio: p.original_offset, offset: 0, scrollTop: 0, scrollLeft: 0 });
+  if (p.translation_block_id) readerRestoreAnchor(translated, ".translation-block", { key: p.translation_block_id, ratio: p.translation_offset, offset: 0, scrollTop: 0, scrollLeft: 0 });
+  else scrollTranslationToPage(p.page);
   state.readerPage = p.page; readerUpdatePageUI(); readerRuntime.position = p;
   readerRuntime.resizeAnchor = readerCaptureAnchor(original, ".reader-page-section");
   readerRuntime.translationAnchor = readerCaptureAnchor(translated, ".translation-block");
@@ -100,9 +96,12 @@ function readerAtPage(container, nodes) {
   if (!nodes.length) return null;
   const line = container.getBoundingClientRect().top + Math.min(100, container.clientHeight * 0.2);
   // Use a fixed reading line; a tall page must not lose to a short adjacent page.
-  let chosen = nodes[0];
-  for (const node of nodes) {
-    if (node.getBoundingClientRect().top <= line) chosen = node;
+  let chosen = nodes[0], rowTop = -Infinity;
+  for (const node of [...nodes].sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top || a.getBoundingClientRect().left - b.getBoundingClientRect().left)) {
+    if (node.getBoundingClientRect().top <= line) {
+      const top = node.getBoundingClientRect().top;
+      if (top > rowTop + 1) { chosen = node; rowTop = top; }
+    }
     else break;
   }
   return chosen;
@@ -161,10 +160,12 @@ async function openReader(id) {
   state.reader = p;
   const cached = readerReadLocal("position", id);
   const position = readerNormalizePosition(cached?.pending ? cached.position : p.reader_state || cached?.position, p);
-  readerRuntime.position = position; readerRuntime.mode = position.mode; readerRuntime.split = position.split_ratio;
+  readerRuntime.position = position; readerRuntime.split = position.split_ratio;
   state.readerPage = position.page; state.selectedBlock = null; state.zoom = position.zoom;
   readerRuntime.thumbsOpen = false; readerRuntime.savedSignature = ""; readerRuntime.editor = null;
   readerRuntime.textLanguage = readerReadLocal("language", id)?.value === "original" ? "original" : "auto";
+  const display = readerReadLocal("display", id);
+  readerRuntime.chromeCollapsed = display?.collapsed === true;
   if (typeof readerTextUI !== "undefined") { readerTextUI.editor = null; readerCloseTextPopup(true); }
   const notesDraft = readerReadLocal("notes", id);
   readerRuntime.notes = { id, value: typeof notesDraft?.value === "string" ? notesDraft.value : p.notes || "", savedValue: p.notes || "", timer: null, saving: null, storageOk: true };
@@ -174,7 +175,6 @@ async function openReader(id) {
     readerRestorePosition(position);
     const blockDraft = readerReadLocal("block", id);
     if (blockDraft && ["note", "translation"].includes(blockDraft.mode) && p.blocks.some(b => b.id === blockDraft.blockId)) {
-      if (readerRuntime.mode === "original") readerSetMode("parallel");
       state.selectedBlock = blockDraft.blockId; refreshBlock(blockDraft.blockId); openBlockEditor(blockDraft.blockId, blockDraft.mode);
       toast("已恢复上次未保存的段落草稿", "success");
     }
@@ -203,6 +203,7 @@ function renderReader() {
       el("button", { class: "reader-thumbs-toggle", id: "reader-thumbs-toggle", "aria-expanded": "false", "aria-controls": "reader-thumbs", onclick: toggleReaderThumbnails }, "缩略图")),
     el("div", { class: "original-scroll", id: "original-scroll", tabindex: "0", "aria-label": "连续 PDF 页面，可上下滚动" }),
     el("div", { class: "reader-thumbs", id: "reader-thumbs", hidden: true }));
+  original.append(button("展开工具栏", () => readerSetDisplay({ collapsed: false }), "secondary", "", { id: "reader-expand-toolbar", hidden: true }));
   $(".page-control .icon-button", original).style.transform = "rotate(180deg)";
   const sync = el("input", { type: "checkbox", id: "reader-sync", checked: readerSyncEnabled(), onchange: event => act(async () => {
     const previous = readerSyncEnabled(), next = event.target.checked;
@@ -210,13 +211,14 @@ function renderReader() {
     try { const data = await api("/api/settings", { method: "PATCH", body: { reader_sync: next } }); state.settings = { ...state.settings, ...(data.settings || data) }; }
     catch (error) { state.settings.reader_sync = previous; event.target.checked = previous; throw error; }
     if (typeof syncPreferenceControls === "function") syncPreferenceControls();
-    if (next && !readerIsEditing()) scrollTranslationToPage(state.readerPage);
+    if (next && !readerIsEditing()) readerSyncScroll($("#original-scroll"));
   }, event.target) });
   const translationLabel = readerRuntime.textLanguage === "original" || translationOf(p).done === 0 ? "英文原文" :
     translationOf(p).done < translationOf(p).total ? "译文与原文" : "中文译文";
   const trans = el("section", { class: "translation-pane", "aria-label": "论文文字与笔记" },
     el("div", { class: "pane-bar" }, el("span", { class: "pane-label", id: "reader-text-pane-label" }, icon("translate"), translationLabel),
-      el("label", { class: "reader-sync-control", title: "滚动时按页联动，点击段落可精确定位" }, sync, "同步滚动"),
+      el("select", { id: "reader-text-zoom", "aria-label": "译文缩放", onchange: event => readerSetTextZoom(Number(event.target.value)) }, READER_ZOOMS.map(value => el("option", { value: String(value) }, `${value}%`))),
+      el("label", { class: "reader-sync-control", title: "按原 PDF 页及页内进度连续联动" }, sync, "同步滚动"),
       el("span", { class: "selection-status", id: "reader-translation-status" }, `第 ${state.readerPage} 页`)),
     el("div", { class: "translation-scroll", id: "translation-scroll", tabindex: "0", "aria-label": "译文或英文原文，可自由选择与复制" }));
   const tools = el("div", { class: "reader-tools" },
@@ -225,11 +227,11 @@ function renderReader() {
     button("笔记", () => toggleReaderNotes(), "secondary", "edit", { id: "reader-notes-toggle", "aria-expanded": "false", "aria-controls": "reader-notes" }),
     button("全文翻译", event => act(() => translateAction(state.reader, ACTIVE_STATUSES.has(translationOf(state.reader).status)), event.currentTarget), "primary", "translate", { id: "reader-translate-button" }));
   const originalLink = safeUrl(p.original_url || `/media/${p.id}/original.pdf`);
-  const modes = el("div", { class: "reader-mode-switch", role: "group", "aria-label": "阅读视图" }, [["parallel", "中英对照"], ["original", "只看原文"], ["translation", "只看译文"]].map(([mode, label]) => button(label, () => readerSetMode(mode), "", "", { "data-reader-mode": mode, "aria-pressed": String(readerRuntime.mode === mode) })));
   const divider = el("div", { class: "reader-divider", id: "reader-divider", role: "separator", tabindex: "0", "aria-label": "调整原文与译文比例", "aria-orientation": "vertical", "aria-valuemin": "30", "aria-valuemax": "70", "aria-controls": "original-scroll translation-scroll", title: "拖动调整比例；方向键微调，Enter 恢复均分" }, el("span", { "aria-hidden": "true" }));
   $("#reader-content").replaceChildren(
     el("div", { class: "reader-topbar" }, el("button", { class: "reader-back", onclick: () => void closeReader(), title: "返回文献库" }, icon("chevron"), "文献库"), el("div", { class: "reader-title", title: titleOf(p) }, titleOf(p)), tools),
-    el("div", { class: "reader-viewbar" }, modes,
+    el("div", { class: "reader-viewbar" },
+      button("折叠工具栏", () => readerSetDisplay({ collapsed: true }), "secondary"),
       el("div", { class: "reader-text-view-switch", role: "group", "aria-label": "右侧文字语言" },
         button("英文原文", () => readerSetTextLanguage("original"), "secondary", "", { "data-text-language": "original", "aria-pressed": String(readerRuntime.textLanguage === "original") }),
         button("译文", () => readerSetTextLanguage("auto"), "secondary", "", { "data-text-language": "auto", "aria-pressed": String(readerRuntime.textLanguage !== "original") })),
@@ -241,6 +243,7 @@ function renderReader() {
   // Layout must be visible before computing page widths and scroll anchors.
   openDialog("#reader-dialog");
   readerApplyLayout(); drawOriginalPage(); renderTranslations(); updateReaderProgress(); readerBindScrolling(); readerBindDivider(divider); readerBindLifecycle();
+  readerSyncTextZoom();
   if (typeof readerBindTextSelection === "function") readerBindTextSelection();
   const dialog = $("#reader-dialog");
   if (readerRuntime.boundDialog !== dialog) {
@@ -267,17 +270,15 @@ async function closeReader() {
 
 function readerApplyLayout() {
   const layout = $("#reader-layout"); if (!layout) return;
-  layout.dataset.mode = readerRuntime.mode;
+  const content = $("#reader-content");
+  if (content?.classList) content.classList.toggle("reader-chrome-collapsed", readerRuntime.chromeCollapsed);
+  const expand = $("#reader-expand-toolbar"); if (expand) expand.hidden = !readerRuntime.chromeCollapsed;
   layout.style.setProperty("--reader-left", `${readerRuntime.split}fr`);
   layout.style.setProperty("--reader-right", `${1 - readerRuntime.split}fr`);
-  $(".original-pane", layout).hidden = readerRuntime.mode === "translation";
-  $(".translation-pane", layout).hidden = readerRuntime.mode === "original";
-  const divider = $("#reader-divider"); divider.hidden = readerRuntime.mode !== "parallel";
+  const divider = $("#reader-divider");
   divider.setAttribute("aria-valuenow", String(Math.round(readerRuntime.split * 100)));
   divider.setAttribute("aria-valuetext", `原文 ${Math.round(readerRuntime.split * 100)}%，译文 ${Math.round((1 - readerRuntime.split) * 100)}%`);
   divider.setAttribute("aria-orientation", typeof matchMedia === "function" && matchMedia("(max-width: 700px)").matches ? "horizontal" : "vertical");
-  $$("[data-reader-mode]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.readerMode === readerRuntime.mode)));
-  const sync = $(".reader-sync-control"); if (sync) sync.hidden = readerRuntime.mode !== "parallel";
 }
 function readerPreserveLayout(change) {
   const position = readerCapturePosition();
@@ -287,17 +288,17 @@ function readerPreserveLayout(change) {
   readerRuntime.layoutFrame = requestAnimationFrame(() => {
     if (!readerScrollActive()) return;
     drawOriginalPage();
-    if (readerRuntime.mode !== "translation") readerRestoreAnchor($("#original-scroll"), ".reader-page-section", originalAnchor);
-    if (readerRuntime.mode !== "original") readerRestoreAnchor($("#translation-scroll"), ".translation-block", translationAnchor);
-    if (position) readerRuntime.position = { ...position, mode: readerRuntime.mode, split_ratio: readerRuntime.split, zoom: state.zoom };
+    readerRestoreAnchor($("#original-scroll"), ".reader-page-section", originalAnchor);
+    readerRestoreAnchor($("#translation-scroll"), ".translation-block", translationAnchor);
+    if (position) readerRuntime.position = { ...position, split_ratio: readerRuntime.split, zoom: state.zoom };
     readerQueuePositionSave();
   });
 }
-function readerSetMode(mode) {
-  if (!READER_MODES.includes(mode) || mode === readerRuntime.mode) return;
-  const position = readerCapturePosition(); readerRuntime.mode = mode; readerApplyLayout();
-  cancelAnimationFrame(readerRuntime.layoutFrame);
-  readerRuntime.layoutFrame = requestAnimationFrame(() => { if (!readerScrollActive()) return; drawOriginalPage(); readerRestorePosition({ ...position, mode }); readerQueuePositionSave(); });
+function readerSetDisplay(options) {
+  readerPreserveLayout(() => {
+    if (options.collapsed !== undefined) readerRuntime.chromeCollapsed = Boolean(options.collapsed);
+    readerWriteLocal("display", state.reader.id, { collapsed: readerRuntime.chromeCollapsed });
+  });
 }
 function readerSetSplit(ratio, persist = true) {
   readerPreserveLayout(() => { readerRuntime.split = Math.round(readerClamp(ratio, .3, .7, .5) * 1000) / 1000; });
@@ -397,8 +398,8 @@ function drawOriginalPage() {
     if (!p.pages.length) scroll.append(el("p", { class: "reader-error" }, "此 PDF 没有可显示的页面"));
     readerRuntime.originalSignature = signature; readerObserveImages();
   }
-  const scale = state.zoom === "fit" ? 1 : Math.max(0.5, Math.min(3, Number(state.zoom) / 100 || 1));
-  scroll.style.setProperty("--pdf-page-width", `${Math.max(220, scroll.clientWidth - 40) * scale}px`);
+  const scale = state.zoom === "fit" ? 1 : Math.max(0.4, Math.min(3, Number(state.zoom) / 100 || 1));
+  scroll.style.setProperty("--pdf-page-width", `${Math.max(40, scroll.clientWidth - 40) * scale}px`);
   const highlights = new Set(p.blocks.filter(b => b.highlight).map(b => b.id));
   $$(".block-overlay", scroll).forEach(n => { n.classList.toggle("highlighted", highlights.has(n.dataset.blockId)); n.classList.toggle("selected", n.dataset.blockId === state.selectedBlock); });
   readerRestoreAnchor(scroll, ".reader-page-section", anchor);
@@ -485,35 +486,73 @@ function readerHandleZoomWheel(event, container) {
     const next = enlarge ? READER_ZOOMS.find(value => value > current) : [...READER_ZOOMS].reverse().find(value => value < current);
     if (next !== undefined) readerSetZoom(next);
   } else {
-    const current = readerClamp(state.settings.reader_font_size, 14, 28, 18);
-    const next = readerClamp(current + (enlarge ? 1 : -1), 14, 28, 18);
-    if (next !== current) {
-      readerRuntime.resizeAnchor = readerCaptureAnchor($("#original-scroll"), ".reader-page-section");
-      readerRuntime.translationAnchor = readerCaptureAnchor(container, ".translation-block");
-      changePreference({ reader_font_size: next });
-    }
+    const current = readerClamp(state.settings.reader_zoom, 40, 200, 100);
+    readerSetTextZoom(readerClamp(current + (enlarge ? 10 : -10), 40, 200, 100));
   }
   return true;
+}
+function readerSyncTextZoom() {
+  const select = $("#reader-text-zoom"); if (!select) return;
+  const value = String(readerClamp(state.settings.reader_zoom, 40, 200, 100));
+  for (const option of [...select.options]) if (option.dataset.custom) option.remove();
+  if (![...select.options].some(o => o.value === value)) select.append(el("option", { value, dataset: { custom: "true" } }, `${value}%`));
+  select.value = value;
+  if (typeof syncSelectMenus === "function") syncSelectMenus();
+}
+function readerSetTextZoom(value) {
+  const next = Math.round(readerClamp(value, 40, 200, 100));
+  if (next === (state.settings.reader_zoom ?? 100)) return;
+  readerRuntime.resizeAnchor = readerCaptureAnchor($("#original-scroll"), ".reader-page-section");
+  readerRuntime.translationAnchor = readerCaptureAnchor($("#translation-scroll"), ".translation-block");
+  changePreference({ reader_zoom: next }); readerSyncTextZoom();
+}
+function readerSyncScroll(source) {
+  const original = $("#original-scroll"), translated = $("#translation-scroll");
+  const target = source === original ? translated : original;
+  const fromSelector = source === original ? ".reader-page-section" : ".reader-source-page";
+  const toSelector = source === original ? ".reader-source-page" : ".reader-page-section";
+  const fromMax = Math.max(0, source.scrollHeight - source.clientHeight);
+  const toMax = Math.max(0, target.scrollHeight - target.clientHeight);
+  if (!fromMax) return;
+  const targets = new Map($$(toSelector, target).map(n => [n.dataset.page, n]));
+  const top = (node, pane) => node.getBoundingClientRect().top - pane.getBoundingClientRect().top + pane.scrollTop;
+  const points = [[0, 0]];
+  for (const node of $$(fromSelector, source)) {
+    const peer = targets.get(node.dataset.page); if (!peer) continue;
+    const x = top(node, source), y = top(peer, target), last = points.at(-1);
+    if (x > last[0] && y > last[1] && x < fromMax && y < toMax) points.push([x, y]);
+  }
+  points.push([fromMax, toMax]);
+  const position = readerClamp(source.scrollTop, 0, fromMax);
+  for (let i = 1; i < points.length; i++) {
+    const [x, y] = points[i], [previousX, previousY] = points[i - 1];
+    if (position > x) continue;
+    readerMoveScroll(target, previousY + (y - previousY) * (position - previousX) / (x - previousX));
+    break;
+  }
 }
 function readerBindScrolling() {
   const original = $("#original-scroll"), translated = $("#translation-scroll");
   for (const [container, side, frame] of [[original, "suppressLeftUntil", "leftFrame"], [translated, "suppressRightUntil", "rightFrame"]]) {
     const release = () => { readerRuntime[side] = 0; };
-    container.addEventListener("wheel", event => { if (!readerHandleZoomWheel(event, container)) release(); }, { passive: false });
+    container.addEventListener("wheel", event => {
+      if (readerHandleZoomWheel(event, container)) return;
+      release();
+    }, { passive: false });
     container.addEventListener("touchstart", release, { passive: true }); container.addEventListener("pointerdown", release);
-    container.addEventListener("keydown", event => { if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "].includes(event.key)) release(); });
+    container.addEventListener("keydown", event => {
+      if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "].includes(event.key)) release();
+    });
     container.addEventListener("scroll", () => {
-        if (readerRuntime[frame]) return;
+      if (readerRuntime[frame]) return;
       readerRuntime[frame] = requestAnimationFrame(() => {
         readerRuntime[frame] = 0; if (!readerScrollActive() || performance.now() < readerRuntime[side]) return;
         const left = container === original;
-        const node = readerAtPage(container, $$(left ? ".reader-page-section" : ".translation-block", container)); if (!node) return;
-        const page = Number(node.dataset.page), changed = readerSetActivePage(page);
+        const node = readerAtPage(container, $$(left ? ".reader-page-section" : ".reader-source-page", container)); if (!node) return;
+        const page = Number(node.dataset.page); readerSetActivePage(page);
         if (left) readerRuntime.resizeAnchor = readerCaptureAnchor(original, ".reader-page-section");
         else readerRuntime.translationAnchor = readerCaptureAnchor(translated, ".translation-block");
-        if (changed && readerRuntime.mode === "parallel" && readerSyncEnabled() && !readerIsEditing()) {
-          if (left) scrollTranslationToPage(page); else { const target = readerOriginalPage(page); readerLoadImage(target && $("img", target)); readerScrollToNode(original, target); }
-        }
+        if (readerSyncEnabled() && !readerIsEditing()) readerSyncScroll(container);
         if (typeof IntersectionObserver !== "function" && left) readerObserveImages();
         readerQueuePositionSave();
       });
@@ -526,21 +565,66 @@ function readerBindScrolling() {
       if (!original.clientWidth) return;
       const anchor = readerRuntime.resizeAnchor, translationAnchor = readerRuntime.translationAnchor; width = original.clientWidth;
       drawOriginalPage(); readerRestoreAnchor(original, ".reader-page-section", anchor);
-      if (readerRuntime.mode !== "original") readerRestoreAnchor(translated, ".translation-block", translationAnchor);
+      readerRestoreAnchor(translated, ".translation-block", translationAnchor);
       readerApplyLayout();
     });
     readerRuntime.resizeObserver.observe(original);
   }
 }
 
-function readerBlockSignature(b) { return JSON.stringify([b.text, b.text_override, b.translation, b.translation_needs_review, b.note, b.highlight, b.kind, b.is_formula, b.image_url, b.has_unparsed_math]); }
+function readerBlockSignature(b) { return JSON.stringify([b.text, b.text_override, b.translation, b.translation_needs_review, b.note, b.highlight, b.kind, b.is_formula, b.is_table, b.image_url, b.has_unparsed_math]); }
+function renderReaderFigure(figure) {
+  const box = figure.bbox, page = state.reader.pages.find(p => Number(p.number) === Number(figure.page));
+  const ratio = box && page ? (box[2] - box[0]) * page.width / ((box[3] - box[1]) * page.height) : 0;
+  return el("figure", { class: "reader-inline-figure", dataset: { figureId: figure.id, page: figure.page } },
+    imageNode(figure.url, { alt: figure.caption || `原论文插图 · 第 ${figure.page} 页`,
+      ...(Number.isFinite(ratio) && ratio > 0 ? { style: { aspectRatio: String(ratio) } } : {}) }));
+}
+function readerSourcePages(p) {
+  const numbers = [...new Set([...(p.pages || []).map(page => Number(page.number)), ...p.blocks.map(b => Number(b.page)), ...(p.figures || []).map(f => Number(f.page))])].filter(n => Number.isInteger(n) && n > 0).sort((a, b) => a - b);
+  return numbers.map(number => {
+    const blocks = p.blocks.filter(b => Number(b.page) === number);
+    const narrow = blocks.filter(b => b.bbox && b.bbox[2] - b.bbox[0] < .55 && b.kind !== "heading");
+    const left = narrow.filter(b => b.bbox[2] <= .56), right = narrow.filter(b => b.bbox[0] >= .44);
+    const twoColumns = left.length >= 2 && right.length >= 2 && left.some(a => right.some(b => a.bbox[1] < b.bbox[3] && b.bbox[1] < a.bbox[3]));
+    const items = [...blocks.map(block => ({ block, bbox: block.bbox })), ...(p.figures || []).filter(f => Number(f.page) === number && f.url).map(figure => ({ figure, bbox: figure.bbox }))];
+    // Page membership is immutable. Geometry only decides placement within it.
+    items.sort((a, b) => (a.bbox?.[1] ?? 1) - (b.bbox?.[1] ?? 1) || (a.bbox?.[0] ?? 0) - (b.bbox?.[0] ?? 0));
+    const bands = []; let columns = null;
+    for (const item of items) {
+      const box = item.bbox;
+      const full = !twoColumns || !box || box[0] < .45 && box[2] > .55 && box[2] - box[0] > .55;
+      if (full) { columns = null; bands.push({ full: item }); }
+      else {
+        if (!columns) { columns = { left: [], right: [] }; bands.push(columns); }
+        columns[(box[0] + box[2]) / 2 < .5 ? "left" : "right"].push(item);
+      }
+    }
+    return { number, twoColumns, bands };
+  });
+}
+function renderSourcePages(p, structure) {
+  const roles = new Map();
+  for (const section of structure.sections) for (const entry of section.entries) for (const id of entry.source_ids) roles.set(id, entry.role);
+  const renderItem = item => {
+    if (item.figure) return renderReaderFigure(item.figure);
+    const b = item.block, entry = { id: b.id, source_ids: [b.id], role: roles.get(b.id) || (b.kind === "heading" ? "section_heading" : b.kind) };
+    readerRuntime.entriesBySource.set(b.id, entry);
+    return renderStructuredParagraph(entry);
+  };
+  return readerSourcePages(p).map(page => el("section", { class: "translation-page reader-source-page", dataset: { page: page.number, columns: page.twoColumns ? 2 : 1 }, "aria-label": `译文 · 原 PDF 第 ${page.number} 页` },
+    el("div", { class: "reader-source-page-body" }, page.bands.length ? page.bands.map(band => band.full ? renderItem(band.full) : el("div", { class: "reader-source-columns" },
+      el("div", { class: "reader-source-column" }, band.left.map(renderItem)), el("div", { class: "reader-source-column" }, band.right.map(renderItem)))) :
+      el("p", { class: "reader-error" }, "本页没有可提取的正文或插图，请对照原 PDF。")),
+    el("footer", { class: "reader-source-page-footer" }, `原 PDF 第 ${page.number} 页`, page.twoColumns ? " · 本页左栏读完，再读右栏" : "")));
+}
 function renderTranslations() {
   const p = state.reader, container = $("#translation-scroll"); if (!p || !container) return;
   if (typeof readerTextProtected === "function" && readerTextProtected()) return;
   const anchorSelector = ".translation-block";
   const anchor = readerCaptureAnchor(container, anchorSelector);
   const structure = p.reading_structure || { sections: [{ id: "body", role: "body", label: "Main text", entries: p.blocks.map(b => ({ id: b.id, role: b.kind === "heading" ? "section_heading" : b.kind, source_ids: [b.id] })) }] };
-  const signature = JSON.stringify([structure.sections, structure.status, structure.error, structure.warnings]);
+  const signature = JSON.stringify([structure.sections, structure.status, structure.error, structure.warnings, p.figures, p.blocks.map(b => [b.id, b.page, b.bbox])]);
   const sameStructure = readerRuntime.structureSignature === signature;
   if (sameStructure) {
     for (const block of p.blocks) if (readerRuntime.blockSignatures.get(block.id) !== readerBlockSignature(block)) refreshBlock(block.id);
@@ -558,12 +642,7 @@ function renderTranslations() {
           if (state.reader?.id === p.id) { updatePaper(normalizeDetail(data)); renderTranslations(); }
         }, event.currentTarget), "secondary", "", { title: "使用 Codex 校对作者机构、摘要和章节；结果保存后重复打开不再消耗额度" }) : null));
     }
-    for (const section of structure.sections) {
-      const first = p.blocks.find(b => b.id === section.entries[0]?.id);
-      fragment.append(el("section", { class: `translation-page translation-section role-${section.role}`, dataset: { page: first?.page || 1, sectionId: section.id }, "aria-label": section.label },
-        section.role !== "body" && section.role !== "title" && asText(first?.text).replace(/\s/g, "").toLowerCase() !== section.label.replace(/\s/g, "").toLowerCase() ? el("h2", { class: "reader-section-heading" }, section.label) : null,
-        section.entries.map(renderStructuredParagraph)));
-    }
+    fragment.append(...renderSourcePages(p, structure));
     if (!p.blocks.length) fragment.append(el("p", { class: "reader-error" }, "未能提取文字，扫描件需要 OCR；请查看原 PDF。"));
     container.replaceChildren(fragment);
     readerRuntime.structureSignature = signature;
@@ -599,12 +678,12 @@ function renderBlock(b) {
   readerRuntime.blockSignatures.set(b.id, readerBlockSignature(b));
   const isFormula = Boolean(b.is_formula), isReference = b.kind === "reference";
   const node = el("article", { class: `translation-block ${readerTextLanguage(b) === "original" && !isFormula ? "untranslated" : ""} ${b.kind === "heading" ? "is-heading" : ""} ${b.kind === "caption" ? "is-caption" : ""}`, dataset: { blockId: b.id, page: b.page } });
-  if (isFormula && b.image_url) node.append(el("div", { class: "block-label" }, "公式 · 原文"), imageNode(b.image_url, { alt: "原文公式", class: "reader-formula-image" }));
+  if (isFormula && b.image_url) node.append(el("div", { class: "block-label" }, "公式 · 原文"), el("div", { class: "reader-source-image" }, imageNode(b.image_url, { alt: "原文公式", class: "reader-formula-image" })));
   else {
     if (isReference || isFormula && !b.translation) node.append(el("div", { class: "block-label" }, isReference ? "参考文献 · 原文" : "公式 · 请对照原文"));
     node.append(el("p", { class: "translated-text" }, readerTextSpan(b)));
   }
-  if (b.is_table && b.image_url && !isFormula) node.append(imageNode(b.image_url, { alt: "原文表格", class: "reader-table-image" }));
+  if (b.is_table && b.image_url && !isFormula) node.append(el("div", { class: "reader-source-image" }, imageNode(b.image_url, { alt: "原文表格", class: "reader-table-image" })));
   if (b.has_unparsed_math && !isFormula) node.append(el("div", { class: "block-label", title: "本段含无法可靠提取的数学字符，请查看左侧原 PDF。" }, "含公式 · 请核对原文"));
   if (b.translation_needs_review) node.append(el("small", { class: "reader-source-review" }, "原文已修改，译文待核对"));
   return node;
@@ -747,6 +826,6 @@ function applyReaderPreferences() {
   if (!readerScrollActive()) return;
   const originalAnchor = readerRuntime.resizeAnchor, translationAnchor = readerRuntime.translationAnchor;
   drawOriginalPage(); readerRestoreAnchor($("#original-scroll"), ".reader-page-section", originalAnchor);
-  if (readerRuntime.mode !== "original") readerRestoreAnchor($("#translation-scroll"), ".translation-block", translationAnchor);
+  readerRestoreAnchor($("#translation-scroll"), ".translation-block", translationAnchor);
   readerQueuePositionSave();
 }

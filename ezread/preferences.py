@@ -19,7 +19,7 @@ def validate_settings(app: ApplicationContext, data):
     for key, values in choices.items():
         if key in data and data[key] not in values:
             raise ValueError(key + ' 选项无效。')
-    for key, low, high in (('ui_font_size', 14, 22), ('reader_font_size', 14, 28)):
+    for key, low, high in (('ui_font_size', 14, 22), ('reader_font_size', 14, 28), ('reader_zoom', 40, 200)):
         if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or not low <= data[key] <= high):
             raise ValueError(f'{key} 必须是 {low}–{high} 范围内的整数。')
     if 'reader_sync' in data and not isinstance(data['reader_sync'], bool):
@@ -73,10 +73,12 @@ def validate_reader_state(app: ApplicationContext, value, doc):
     block_id = merged.get('translation_block_id')
     if block_id is not None and (not isinstance(block_id, str) or not any(b['id'] == block_id for b in doc.get('blocks', []))):
         raise ValueError('译文定位段落不属于这篇论文。')
-    if 'zoom' in merged and (isinstance(merged['zoom'], bool) or merged['zoom'] not in ('fit', 75, 100, 125, 150, 200)):
+    if 'zoom' in merged and (isinstance(merged['zoom'], bool) or merged['zoom'] not in ('fit', 40, 50, 60, 75, 100, 125, 150, 200)):
         raise ValueError('PDF 缩放选项无效。')
     if 'split_ratio' in merged and not app.valid_ratio(merged['split_ratio'], .3, .7):
         raise ValueError('阅读分栏比例必须在 0.3–0.7 之间。')
     if 'mode' in merged and merged['mode'] not in ('parallel', 'original', 'translation'):
         raise ValueError('阅读模式无效。')
+    # Accept legacy saved view modes, but no longer persist or restore them.
+    merged.pop('mode', None)
     return merged

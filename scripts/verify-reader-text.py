@@ -70,7 +70,7 @@ def main():
         paper_ai.translate_batch = lambda *args, **kwargs: ('mock-thread', {b['id']: '重译：' + b['text'] for b in args[3]})
         doc = {'id': PID, 'hash': 'synthetic-original-pdf', 'title': 'Reader interaction fixture', 'authors': ['Test Author'],
                'journal': 'Synthetic Journal', 'year': 2026, 'deleted': False, 'translation': {'status': 'completed'},
-               'pages': [{'number': 1, 'width': 595, 'height': 842, 'image': 'page-001.png'}], 'figures': [],
+               'pages': [{'number': n, 'width': 595, 'height': 842, 'image': 'page-001.png'} for n in (1, 2)], 'figures': [],
                'blocks': [
                    {'id': 'one', 'kind': 'paragraph', 'page': 1, 'text': 'First 😀 sentence. Another sentence.', 'translation': '第一😀句。第二句话保留。', 'bbox': [.1,.2,.85,.25]},
                    {'id': 'two', 'kind': 'paragraph', 'page': 1, 'text': 'Second paragraph has selectable text.', 'translation': '另一个自然段可以自由选择文字。', 'bbox': [.1,.4,.85,.45]},

@@ -51,21 +51,26 @@ const translated = {
 nodes.set("#original-scroll", original); nodes.set("#translation-scroll", translated);
 
 async function main() {
+  const originalPages = {pages:[{number:1},{number:2}],blocks:[
+    {id:'a',page:1,bbox:[.1,.1,.45,.2]}, {id:'b',page:1,bbox:[.1,.3,.45,.4]},
+    {id:'c',page:1,bbox:[.55,.1,.9,.2]}, {id:'d',page:1,bbox:[.55,.3,.9,.4]},
+    {id:'e',page:2,bbox:[.1,.1,.9,.8]}
+  ],figures:[{id:'wide',page:1,url:'/f.jpg',bbox:[.1,.5,.9,.8]}]};
+  const sourcePages=context.readerSourcePages(originalPages);
+  assert.equal(sourcePages.length,2);assert.equal(sourcePages[0].twoColumns,true);assert.equal(sourcePages[1].twoColumns,false);
+  assert.equal(sourcePages[0].bands[0].left.length,2);assert.equal(sourcePages[0].bands[0].right.length,2);
+  assert.equal(sourcePages[0].bands[1].full.figure.id,'wide');assert.equal(sourcePages[1].bands[0].full.block.id,'e');
   let value = context.readerNormalizePosition({ page: 99, original_offset: 2, translation_offset: -1, translation_block_id: "foreign", zoom: 999, split_ratio: .1, mode: "bad" });
   assert.equal(value.page, 3); assert.equal(value.original_offset, 1); assert.equal(value.translation_offset, 0);
-  assert.equal(value.translation_block_id, null); assert.equal(value.zoom, "fit"); assert.equal(value.split_ratio, .3); assert.equal(value.mode, "parallel");
+  assert.equal(value.translation_block_id, null); assert.equal(value.zoom, "fit"); assert.equal(value.split_ratio, .3); assert.equal(Object.hasOwn(value, "mode"), false);
   value = context.readerNormalizePosition({}); assert.equal(value.split_ratio, .6); assert.equal(value.zoom, "fit");
 
-  R.mode = "parallel"; R.split = .64;
+  R.split = .64;
   let position = context.readerCapturePosition();
   assert.equal(position.page, 2); assert.equal(position.original_offset, .3); assert.equal(position.translation_block_id, "b2");
   assert.equal(position.translation_offset, .25); assert.equal(position.zoom, 125); assert.equal(position.split_ratio, .64);
   context.readerRestoreAnchor(original, ".reader-page-section", { key: "2", ratio: .3, offset: 0, scrollTop: 0, scrollLeft: 0 });
   assert.equal(original.last.top, 700);
-  R.mode = "original"; translated.nodes[".translation-block"][0] = box(-30, 200, { blockId: "b1", page: "1" });
-  position = context.readerCapturePosition(); assert.equal(position.translation_block_id, "b2"); assert.equal(position.translation_offset, .25);
-  R.mode = "parallel"; translated.nodes[".translation-block"][0] = box(50, 200, { blockId: "b2", page: "2" });
-
   const writes = [];
   apiHandler = async (url, options) => { writes.push({ url, body: options.body }); return {}; };
   await context.saveReadPage(); assert.equal(writes.length, 1); assert.equal(writes[0].body.reader_state.original_offset, .3);
@@ -132,21 +137,24 @@ async function main() {
   assert.equal(original.last.top, 700, "PDF zoom must retain the current page anchor.");
   assert.equal(wheel("pdf", 120).prevented, true); assert.equal(state.zoom, 100);
   state.zoom = "fit"; wheel("pdf", 120); assert.equal(state.zoom, 75);
+  wheel("pdf", 120); assert.equal(state.zoom, 60);
+  wheel("pdf", 120); assert.equal(state.zoom, 50);
+  wheel("pdf", 120); assert.equal(state.zoom, 40);
   const draws = widths.length; assert.equal(wheel("pdf", 120).prevented, true); assert.equal(widths.length, draws);
   state.zoom = 200; assert.equal(wheel("pdf", -120).prevented, true); assert.equal(state.zoom, 200);
   context.readerSetZoom("150"); assert.equal(state.zoom, 150); assert.equal(zoomSelect.value, "150");
   context.readerSetZoom(999); assert.equal(state.zoom, 150);
 
-  assert.equal(wheel("text", -120).prevented, true); assert.equal(state.settings.reader_font_size, 19);
+  assert.equal(wheel("text", -120).prevented, true); assert.equal(state.settings.reader_zoom, 110);
   assert.equal(state.zoom, 150); assert.equal(state.settings.ui_font_size, 16);
   assert.equal(R.translationAnchor.key, "b2"); assert.equal(translated.last.top, 300);
-  wheel("text", 120); assert.equal(state.settings.reader_font_size, 18);
-  wheel("text", -120, false); assert.equal(state.settings.reader_font_size, 18);
-  state.settings.reader_font_size = 28; const saves = fontWrites.length;
+  wheel("text", 120); assert.equal(state.settings.reader_zoom, 100);
+  wheel("text", -120, false); assert.equal(state.settings.reader_zoom, 100);
+  state.settings.reader_zoom = 200; const saves = fontWrites.length;
   assert.equal(wheel("text", -120).prevented, true); assert.equal(fontWrites.length, saves);
-  state.settings.reader_font_size = 14; assert.equal(wheel("text", 120).prevented, true); assert.equal(fontWrites.length, saves);
+  state.settings.reader_zoom = 40; assert.equal(wheel("text", 120).prevented, true); assert.equal(fontWrites.length, saves);
   dialog.open = false; assert.equal(wheel("pdf", 120).prevented, false); assert.equal(wheel("text", -120).prevented, false);
-  assert.equal(state.zoom, 150); assert.equal(state.settings.reader_font_size, 14);
+  assert.equal(state.zoom, 150); assert.equal(state.settings.reader_font_size, 18);
   console.log("Reader behavior checks passed: anchors, offset persistence, offline drafts, concurrent notes, safe close, keyboard split, Ctrl+wheel PDF/text zoom.");
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

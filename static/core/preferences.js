@@ -6,7 +6,10 @@ function applyPreferences() {
   root.dataset.theme = p.theme;
   root.dataset.pageHidden = String(document.hidden);
   root.style.setProperty("--ui-font-size", `${Math.max(14, Math.min(22, Number(p.ui_font_size) || 16))}px`);
-  root.style.setProperty("--reader-font-size", `${Math.max(14, Math.min(28, Number(p.reader_font_size) || 18))}px`);
+  const readerSize = Math.max(14, Math.min(28, Number(p.reader_font_size) || 18)) * Math.max(40, Math.min(200, Number(p.reader_zoom) || 100)) / 100;
+  root.style.setProperty("--reader-font-size", `${readerSize}px`);
+  root.style.setProperty("--reader-content-scale", String(readerSize / 18));
+  root.style.setProperty("--reader-image-width", `${readerSize / 18 * 100}%`);
   writeBrowserSetting("preferences", JSON.stringify(p));
   syncPreferenceControls();
   if (typeof applyReaderPreferences === "function") applyReaderPreferences();

@@ -268,8 +268,16 @@ class TranslationTests(unittest.TestCase):
 
     def test_reader_state_validation_and_independent_settings(self):
         state = {'version': 1, 'page': 2, 'original_offset': .5, 'translation_block_id': 'p2',
-                 'translation_offset': .25, 'zoom': 125, 'split_ratio': .6, 'mode': 'parallel'}
+                 'translation_offset': .25, 'zoom': 125, 'split_ratio': .6}
         self.assertEqual(server.validate_reader_state(state, self.doc), state)
+        for legacy in ('original', 'translation', 'parallel'):
+            self.assertEqual(server.validate_reader_state({**state, 'mode': legacy}, self.doc), state)
+        for zoom in (40, 50, 60):
+            self.assertEqual(server.validate_reader_state({**state, 'zoom': zoom}, self.doc)['zoom'], zoom)
+            self.assertEqual(server.validate_settings({'reader_zoom': zoom}), {'reader_zoom': zoom})
+        for zoom in (39, 201, True, float('nan')):
+            with self.assertRaises(ValueError):
+                server.validate_settings({'reader_zoom': zoom})
         for bad in ({'page': True}, {'page': 3}, {'original_offset': float('nan')},
                     {'translation_block_id': 'foreign'}, {'split_ratio': .9}, {'zoom': 99}, {'mode': 'bad'}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):

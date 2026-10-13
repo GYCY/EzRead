@@ -9,9 +9,14 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
   page.on('pageerror', error => errors.push(error.message));
   const source = id => page.locator(`.reader-source-text[data-source-id="${id}"]`);
   const apiState = async () => (await page.request.get(origin + '/__test/state')).json();
+  let firstOpen = true;
   async function open() {
     await page.goto(origin); await page.waitForSelector('.paper-card');
     await page.evaluate(id => openReader(id), pid); await source('one').waitFor();
+    if(firstOpen) {
+      assert.equal(await page.locator('#reader-text-layout').count(),0);
+      assert.equal(await page.locator('.reader-source-page').count(),2);firstOpen=false;
+    }
     await page.evaluate(() => {
       window.__nativeCopy = null;
       document.addEventListener('copy', e => { window.__nativeCopy = window.getSelection().toString(); e.preventDefault(); }, {once:true});
@@ -20,6 +25,7 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
   }
   async function select(id, quote, drag=false) {
     await page.evaluate(() => { readerCloseTextPopup(true); window.getSelection().removeAllRanges(); });
+    await source(id).scrollIntoViewIfNeeded();
     const point = await source(id).evaluate((span, quote) => {
       const at = span.textContent.indexOf(quote); if (at < 0) throw Error('Missing quote: ' + quote);
       const range = document.createRange(); range.setStart(span.firstChild,at); range.setEnd(span.firstChild,at+quote.length);
@@ -285,6 +291,199 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
     checks.push('translation choices fit narrow windows at 850 and 550 pixels');
     await page.setViewportSize({width:1440,height:1000});
     await page.screenshot({path:path.join(root,'work/reader-text-selection-preview.png')});
+    await page.evaluate(() => {
+      readerCloseTextPopup(true); window.getSelection().removeAllRanges();
+      state.reader.blocks.find(b=>b.id==='four').text += ' A continuous passage remains on its original PDF page as the page grows.'.repeat(24);
+      state.reader.blocks.find(b=>b.id==='five').page = 2;
+      state.reader.blocks.push({id:'figure-caption',page:1,kind:'caption',text:'Fig. 1. Original diagram',translation:'图 1. 示意图',bbox:[.1,.92,.9,.96]});
+      state.reader.reading_structure.sections.at(-1).entries.push({id:'figure-caption',role:'caption',source_ids:['figure-caption']});
+      state.reader.figures = [{id:'fig-1',page:1,url:state.reader.pages[0].image_url,caption:'Fig. 1. Original diagram',bbox:[.1,.3,.9,.85]}];
+      for (const [id, flags] of [['table-fixture',{is_table:true}],['formula-fixture',{is_formula:true}]]) {
+        state.reader.blocks.push({id,page:1,kind:'paragraph',text:id,translation:id,image_url:state.reader.pages[0].image_url,...flags});
+        state.reader.reading_structure.sections.at(-1).entries.push({id,role:'paragraph',source_ids:[id]});
+      }
+      renderTranslations();
+    });
+    const figure = page.locator('.reader-inline-figure');
+    await figure.scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => {const img=document.querySelector('.reader-inline-figure img');return img.complete&&img.naturalWidth>0;});
+    assert(await figure.evaluate(n=>Boolean(n.compareDocumentPosition(document.querySelector('[data-block-id="figure-caption"]'))&Node.DOCUMENT_POSITION_FOLLOWING)));
+    const imageSource = await figure.locator('img').getAttribute('src');
+    await page.evaluate(() => { state.reader.blocks.find(b=>b.id==='figure-caption').translation='更新后的图注'; renderTranslations(); renderTranslations(); });
+    assert.equal(await figure.count(),1);
+    assert.equal(await figure.locator('img').getAttribute('src'),imageSource);
+    for(const width of [1440,550]) {
+      await page.setViewportSize({width,height:1000});
+      await page.evaluate(() => changePreference({reader_font_size:18,reader_zoom:100}));
+      await figure.scrollIntoViewIfNeeded();
+      const fits = await figure.locator('img').evaluate(img=>img.getBoundingClientRect().width<=document.querySelector('#translation-scroll').clientWidth);
+      assert(fits,'Original figure fits the translation pane.');
+      const base = await figure.locator('img').boundingBox();
+      const table = page.locator('.reader-table-image'), formula = page.locator('.reader-formula-image');
+      await table.scrollIntoViewIfNeeded(); await formula.scrollIntoViewIfNeeded();
+      await page.waitForFunction(()=>[...document.querySelectorAll('.reader-source-image img')].every(img=>img.complete&&img.naturalWidth));
+      const tableBase = await table.boundingBox(), formulaBase = await formula.boundingBox();
+      const parentWidth = img => img.evaluate(n=>n.parentElement.clientWidth);
+      const figureParent=await parentWidth(figure.locator('img')),tableParent=await parentWidth(table),formulaParent=await parentWidth(formula);
+      const spacing = () => source('two').evaluate(n=>{const p=getComputedStyle(n.closest('.translated-text')),b=getComputedStyle(n.closest('.translation-block'));return {line:parseFloat(p.lineHeight),margin:parseFloat(b.marginBottom),padding:parseFloat(b.paddingTop)};});
+      const spacingBase = await spacing();
+      // Dispatch the actual DOM wheel event on the image so bubbling and the
+      // translation-pane handler both run; only the system browser zoom is excluded.
+      async function zoom(deltaY, expected) {
+        await figure.locator('img').dispatchEvent('wheel',{deltaY,ctrlKey:true,bubbles:true,cancelable:true});
+        await page.waitForFunction(size=>state.settings.reader_zoom===size,expected);
+        const box = await figure.locator('img').boundingBox();
+        assert(Math.abs(box.width/base.width/(await parentWidth(figure.locator('img'))/figureParent)-expected/100)<.01,'Image width follows text zoom.');
+        assert(Math.abs(box.height/box.width-base.height/base.width)<.01,'Image aspect ratio survives zoom.');
+        assert(Math.abs((await table.boundingBox()).width/tableBase.width/(await parentWidth(table)/tableParent)-expected/100)<.01,'Tables follow zoom.');
+        assert(Math.abs((await formula.boundingBox()).width/formulaBase.width/(await parentWidth(formula)/formulaParent)-expected/100)<.01,'Formula crops follow zoom.');
+        const spaces = await spacing();
+        for(const key of ['line','margin','padding']) assert(Math.abs(spaces[key]/spacingBase[key]-expected/100)<.01,`${key} follows text zoom.`);
+        if(expected<100) for(const img of [figure.locator('img'),table,formula]) assert(await img.evaluate(n=>{const a=n.getBoundingClientRect(),b=n.parentElement.getBoundingClientRect();return Math.abs(a.left+a.width/2-b.left-b.width/2)<2;}),'Reduced image is centered.');
+      }
+      for(const expected of [90,80,70,60,50,40]) await zoom(120,expected);
+      await zoom(120,40);
+      for(const expected of [50,60,70,80,90,100,110]) await zoom(-120,expected);
+      assert(await figure.evaluate(n=>n.scrollWidth>n.clientWidth),'Enlarged image remains accessible by horizontal scrolling.');
+      assert(await figure.evaluate(n=>n.getBoundingClientRect().width<=document.querySelector('#translation-scroll').clientWidth),'Zoom does not widen the reading pane.');
+      await zoom(120,100);
+      await page.screenshot({path:path.join(root,`work/reader-inline-figure-${width}.png`)});
+    }
+    await page.setViewportSize({width:1440,height:1000});
+    await page.evaluate(()=>{document.querySelector('#translation-scroll').scrollTop=0;});
+    const pane = page.locator('#translation-scroll');
+    await pane.hover(); await page.mouse.wheel(0,80);
+    await page.waitForFunction(()=>document.querySelector('#translation-scroll').scrollTop>0);
+    await page.waitForTimeout(250);
+    const moved=await pane.evaluate(n=>n.scrollTop);
+    assert(moved<150,'A small wheel movement scrolls continuously rather than flipping a page.');
+    assert.equal(await pane.evaluate(n=>n.scrollLeft),0);
+    assert.equal(await page.locator('#reader-reading-footer').count(),0);
+    checks.push('translation pane native wheel scroll stays continuous without virtual pages');
+    const beforeHeight = await page.locator('#translation-scroll').evaluate(n=>n.clientHeight);
+    await page.getByRole('button',{name:'折叠工具栏',exact:true}).click();
+    assert(await page.locator('#translation-scroll').evaluate(n=>n.clientHeight)>beforeHeight+70);
+    assert.equal(await page.locator('.reader-topbar').isVisible(),false);
+    assert.equal(await page.locator('.translation-pane .pane-bar').isVisible(),false);
+    await page.screenshot({path:path.join(root,'work/reader-collapsed-toolbar.png')});
+    await page.getByRole('button',{name:'展开工具栏',exact:true}).click();
+    await page.evaluate(()=>readerSetZoom(40));
+    await page.waitForFunction(()=>document.querySelectorAll('.reader-page-section').length===2);
+    const rects = await page.locator('.reader-page-section').evaluateAll(nodes=>nodes.map(n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,height:r.height};}));
+    assert(rects[1].y>=rects[0].y+rects[0].height,'PDF pages always remain in one continuous vertical stream.');
+    for(const width of [550,1440]) {
+      await page.setViewportSize({width,height:1000});
+      assert(await page.locator('.original-pane').isVisible());
+      assert(await page.locator('.translation-pane').isVisible());
+      assert(await page.locator('#reader-content').evaluate(n=>n.scrollWidth<=n.clientWidth+1),'Comparison fits wide and narrow windows.');
+    }
+    await page.getByRole('button',{name:'折叠工具栏',exact:true}).click();
+    await page.getByRole('button',{name:'展开工具栏',exact:true}).click();
+    await page.evaluate(async()=>{readerSetTextZoom(40); readerSetDisplay({collapsed:true}); await flushPreferences(); await saveReadPage();});
+    await page.evaluate(()=>{const id=state.reader.id;readerWriteLocal('display',id,{columns:2,collapsed:true});readerWriteLocal('position',id,{position:{...readerCapturePosition(),mode:'translation'},pending:true});});
+    await page.reload(); await page.waitForSelector('.paper-card');
+    assert.equal(await page.evaluate(()=>document.documentElement.style.getPropertyValue('--reader-image-width')),'40%');
+    await page.evaluate(id=>openReader(id),pid);
+    assert.equal(await page.locator('#reader-columns, [data-reader-mode], .reader-mode-switch').count(),0);
+    assert.equal(await page.evaluate(()=>readerRuntime.chromeCollapsed),true);
+    assert.equal(await page.evaluate(()=>state.zoom),40);
+    assert(await page.locator('.original-pane').isVisible());
+    assert(await page.locator('.translation-pane').isVisible());
+    for(const name of ['中英对照','只看原文','只看译文','双列阅读','双页阅读']) assert.equal(await page.getByRole('button',{name,exact:true}).count(),0);
+    await page.getByRole('button',{name:'展开工具栏',exact:true}).click();
+    checks.push('40% zoom, source page layout, collapsing/restoring all top bars and saved display preferences');
+    await page.setViewportSize({width:1440,height:1000});
+    await page.evaluate(()=>{
+      state.reader.blocks.find(b=>b.id==='five').page=2;
+      for(const [id,bbox] of [['one',[.1,.1,.45,.2]],['two',[.1,.3,.45,.4]],['three',[.55,.1,.9,.2]],['four',[.55,.3,.9,.4]]]) state.reader.blocks.find(b=>b.id===id).bbox=bbox;
+      state.reader.reading_structure.sections=[{id:'merged',role:'body',label:'Main text',entries:[{id:'merged-across-pages',role:'paragraph',source_ids:state.reader.blocks.map(b=>b.id)}]}];
+      state.reader.figures=[1,2].map(page=>({id:`source-fig-${page}`,page,url:state.reader.pages[0].image_url,bbox:[.1,.85,.9,.95]}));
+      renderTranslations();
+    });
+    await page.waitForSelector('.reader-source-page');
+    const membership = await page.evaluate(()=>{
+      const all=[...document.querySelectorAll('.reader-source-text')];
+      return {count:all.length,unique:new Set(all.map(n=>n.dataset.sourceId)).size,
+        valid:all.every(n=>Number(n.closest('.reader-source-page').dataset.page)===Number(state.reader.blocks.find(b=>b.id===n.dataset.sourceId).page)),
+        expected:state.reader.blocks.filter(b=>!b.is_formula||!b.image_url).length};
+    });
+    assert(membership.valid); assert.equal(membership.count,membership.unique); assert.equal(membership.count,membership.expected);
+    assert.equal(await page.locator('.reader-source-page').first().getAttribute('data-columns'),'2');
+    assert(await page.locator('.reader-inline-figure').evaluateAll(nodes=>nodes.every(n=>n.dataset.page===n.closest('.reader-source-page').dataset.page)),'Figures stay on their exact source page.');
+    const beforePageHeight=await page.locator('.reader-source-page').first().evaluate(n=>n.getBoundingClientRect().height);
+    await page.evaluate(()=>{state.reader.blocks[0].translation='较长译文仍然属于原来这一页。'.repeat(1500);state.reader.blocks[0].text_override='A long original paragraph. '.repeat(1500);renderTranslations();});
+    const afterPageHeight=await page.locator('.reader-source-page').first().evaluate(n=>n.getBoundingClientRect().height);
+    assert(afterPageHeight>beforePageHeight+500,'Extra translation extends its source page vertically.');
+    assert.equal(await page.locator('.reader-source-page').count(),2,'Long translation never creates another page.');
+    assert.equal(await page.locator('#reader-reading-footer').count(),0);
+    await page.evaluate(()=>{state.settings.reader_sync=true;});
+    await page.waitForTimeout(300);
+    // Exercise actual scroll events in both directions, including a page boundary.
+    for(const side of ['translation-scroll','original-scroll']) {
+      const samples=await page.evaluate(async side=>{
+        const src=document.getElementById(side),dst=document.getElementById(side==='translation-scroll'?'original-scroll':'translation-scroll');
+        const selector=side==='translation-scroll'?'.reader-source-page':'.reader-page-section';
+        const page2=src.querySelectorAll(selector)[1];
+        const boundary=page2.getBoundingClientRect().top-src.getBoundingClientRect().top+src.scrollTop;
+        const max=src.scrollHeight-src.clientHeight;
+        const positions=[0,40,80,...[boundary-20,boundary,boundary+20].filter(v=>v>80&&v<max),max];
+        const results=[];
+        for(const position of positions){
+          readerRuntime.suppressLeftUntil=0;readerRuntime.suppressRightUntil=0;
+          src.scrollTop=position;
+          await new Promise(resolve=>setTimeout(resolve,70));
+          results.push({source:src.scrollTop,target:dst.scrollTop});
+        }
+        return {results,maxTarget:dst.scrollHeight-dst.clientHeight};
+      },side);
+      assert(samples.results[1].target>samples.results[0].target,'Peer moves within the same page.');
+      assert(samples.results[2].target>samples.results[1].target,'Every incremental scroll moves its peer.');
+      for(let i=1;i<samples.results.length;i++) assert(samples.results[i].target>=samples.results[i-1].target,'Sync is monotonic across page boundaries.');
+      assert(Math.abs(samples.results.at(-1).target-samples.maxTarget)<2,'Both panes reach the bottom.');
+    }
+    await page.evaluate(()=>{state.settings.reader_sync=false;});
+    const independent=await page.evaluate(async()=>{
+      const left=document.querySelector('#original-scroll'),right=document.querySelector('#translation-scroll'),before=left.scrollTop;
+      readerRuntime.suppressRightUntil=0;right.scrollTop-=40;
+      await new Promise(resolve=>setTimeout(resolve,80));return left.scrollTop===before;
+    });
+    assert(independent,'Disabling synchronization leaves the other pane untouched.');
+    checks.push('bidirectional continuous page-progress sync, page boundaries, bottom alignment and disabled sync');
+    await page.screenshot({path:path.join(root,'work/reader-source-page-layout.png')});
+    checks.push('source layout defaults to one translated page per PDF page, keeps each block exactly once, and grows page height without pagination');
+    checks.push('Ctrl+wheel scales original images proportionally in both directions, confines overflow and restores saved zoom');
+    checks.push('original image loads before its caption, survives translation refresh without duplication, and fits wide/narrow windows');
+    await page.evaluate(async()=>{await closeReader();document.querySelectorAll('dialog[open]').forEach(d=>d.close());document.querySelector('#library-view').style.minHeight='3500px';});
+    await page.waitForTimeout(150);
+    await page.evaluate(()=>window.scrollTo(0,300));
+    const libraryBefore=await page.evaluate(()=>({y:scrollY,width:document.body.clientWidth}));
+    assert(libraryBefore.y>0,'The background must be scrollable before opening a paper.');
+    for(const kind of ['detail','reader']) {
+      await page.evaluate(async({kind,pid})=>{if(kind==='detail')await openDetail(pid);else await openReader(pid);},{kind,pid});
+      const locked=await page.evaluate(()=>({y:scrollY,width:document.body.clientWidth,overflow:getComputedStyle(document.documentElement).overflowY}));
+      assert.equal(locked.overflow,'hidden','The outer scrollbar is hidden for every paper dialog.');
+      assert.equal(locked.y,libraryBefore.y);assert.equal(locked.width,libraryBefore.width,'Locking does not shift library columns.');
+      await page.mouse.move(1437,450);await page.mouse.wheel(0,500);await page.waitForTimeout(180);
+      assert.equal(await page.evaluate(()=>scrollY),locked.y,'Wheeling the background edge cannot move the library.');
+      if(kind==='detail') {
+        await page.evaluate(()=>{document.querySelector('#detail-scroll').firstElementChild.style.minHeight='2500px';});
+        await page.locator('#detail-scroll').hover();await page.mouse.wheel(0,200);
+        await page.waitForFunction(()=>document.querySelector('#detail-scroll').scrollTop>0);
+        assert.equal(await page.evaluate(()=>scrollY),locked.y,'Dialog content scrolls independently.');
+        await page.evaluate(()=>openDialog('#edit-dialog'));
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(()=>!document.querySelector('#edit-dialog').open);
+        assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).overflowY),'hidden','Closing a nested dialog keeps its parent background locked.');
+        await page.evaluate(()=>closeDialog('#detail-dialog'));
+      } else await page.evaluate(()=>closeReader());
+      await page.waitForFunction(()=>!document.querySelector('dialog[open]'));
+      await page.waitForTimeout(150);
+      assert.notEqual(await page.evaluate(()=>getComputedStyle(document.documentElement).overflowY),'hidden');
+      assert.equal(await page.evaluate(()=>scrollY),libraryBefore.y,'Closing restores the original library position.');
+    }
+    await page.mouse.move(1000,600);await page.mouse.wheel(0,160);
+    await page.waitForFunction(y=>scrollY>y,libraryBefore.y);
+    checks.push('paper detail and reader hide background scrollbar, lock edge wheel, retain inner scrolling and library position, including nested Escape close');
     assert.deepEqual(errors,[]);
     fs.writeFileSync(path.join(root,'work/reader-text-browser-verification.json'),JSON.stringify({checks,errors,realModelCalls:0,realLibraryWrites:0,mockedTranslationCalls:(await apiState()).calls.length},null,2));
     console.log(JSON.stringify({checks:checks.length,errors,realModelCalls:0,realLibraryWrites:0}));

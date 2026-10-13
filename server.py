@@ -48,7 +48,7 @@ SELECTION_SESSION = SelectionSession()
 STRUCTURE_JOBS = queue.Queue()
 STRUCTURE_QUEUED = set()
 DEFAULT_SETTINGS = {'sort': 'last_read', 'theme': 'paper', 'collections': [],
-                    'ui_font_size': 16, 'reader_font_size': 18,
+                    'ui_font_size': 16, 'reader_font_size': 18, 'reader_zoom': 100,
                     'reader_sync': True, 'reader_split_ratio': 0.5,
                     'translation_model': '', 'translation_reasoning_effort': '',
                     'selection_translation_model': 'gpt-6-luna', 'selection_translation_reasoning_effort': ''}
