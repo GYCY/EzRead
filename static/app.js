@@ -88,7 +88,6 @@ function installEvents() {
     if (activeCardMenuId) { event.preventDefault(); event.stopPropagation(); closeCardMenu(true); }
     else if (state.selectionMode && !$("dialog[open]") && !activeFilterTrigger && !draggingPaperIds.length) { event.preventDefault(); cancelPaperSelection(); }
   });
-  $("#refresh-status").addEventListener("click", event => act(async () => { await refreshStatus(); await loadLibrary(); toast("已更新连接与任务状态"); }, event.currentTarget));
   $$('[data-close]').forEach(node => node.addEventListener("click", () => closeDialog(`#${node.dataset.close}`)));
   $("#queue-close").addEventListener("click", () => closeDialog("#queue-dialog"));
   $("#queue-dialog").addEventListener("close", () => { renderLibrary(); requestAnimationFrame(() => { if (!$("#queue-dialog").open) window.scrollTo({ top: queueLibraryScroll }); }); });

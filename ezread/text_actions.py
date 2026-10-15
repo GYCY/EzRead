@@ -82,9 +82,16 @@ def resolve_range(block, anchor):
 
 def resolved_annotations(doc):
     by_id = {b['id']: b for b in doc.get('blocks', [])}
+    replacements = {bid: repair['replacement_ids'] for repair in doc.get('paragraph_repairs', []) for bid in repair['source_ids']}
+    def resolve(anchor):
+        if anchor['block_id'] not in replacements:
+            return resolve_range(by_id.get(anchor['block_id']), anchor)
+        candidates = [resolve_range(by_id.get(bid), {**anchor, 'block_id': bid}) for bid in replacements[anchor['block_id']]]
+        candidates = [r for r in candidates if r['status'] == 'resolved']
+        return candidates[0] if len(candidates) == 1 else {**anchor, 'status': 'needs_review'}
     result = []
     for item in doc.get('text_annotations', []):
-        ranges = [resolve_range(by_id.get(r['block_id']), r) for r in item['ranges']]
+        ranges = [resolve(r) for r in item['ranges']]
         result.append({**item, 'ranges': ranges,
                        'status': 'resolved' if all(r['status'] == 'resolved' for r in ranges) else 'needs_review'})
     return result

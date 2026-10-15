@@ -991,8 +991,9 @@ dialog::backdrop {
   overscroll-behavior: contain;
   padding: 1.25rem;
 }
-.queue-dialog-scroll > .status-panel {
-  margin-top: 0;
+#usage-status .progress-track {
+  height: 6px;
+  margin: 0.55rem 0;
 }
 @media (max-width: 850px) {
   .queue-dialog .queue-item {
@@ -1740,7 +1741,7 @@ dialog::backdrop {
   color: var(--green);
 }
 .paper-card[draggable="true"] {
-  cursor: grab;
+  cursor: pointer;
 }
 .paper-card.is-dragging {
   opacity: 1;

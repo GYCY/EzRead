@@ -17,10 +17,11 @@ from pathlib import Path
 
 import pdfplumber
 import pypdfium2 as pdfium
+import layout_rules
 
 _PDF_LOCK = threading.RLock()
-_FIGURE_START = re.compile(r"^(?:Fig(?:ure)?|FIG(?:URE)?)\.?\s*\d+\s*(?:[|:—–]|\.(?=\s)|\s+(?=[A-Z]))")
-_TABLE_START = re.compile(r"^(?:Table|TABLE)\s+\d+\b")
+_FIGURE_START = layout_rules.FIGURE_START
+_TABLE_START = layout_rules.TABLE_START
 _DOI = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.I)
 _PROSE_LEAD = re.compile(r'^(?:where|and|or|that|which|with|for|if|when|then|using|here|as|we)\b', re.I)
 
@@ -252,12 +253,19 @@ def _lines(page):
     lines = []
     for row in rows:
         ordered = sorted(row['chars'], key=lambda c: c['x0'])
+        row_text = _line_text(ordered)
+        # Justified prose may contain very wide word spaces within one column.
+        # Column assignment has already happened; these gaps are not new columns.
+        prose_row = (row['column'] in ('left', 'right')
+                     and len(re.findall(r'[A-Za-z]{2,}', row_text)) >= 4
+                     and len(re.findall(r'[A-Za-z]', row_text)) >= 20
+                     and not re.search(r'\(\d+\)\s*$', row_text))
         segments = [[]]
         for char in ordered:
             if segments[-1]:
                 prior = segments[-1][-1]
                 # Split columns/cells, but never a normal word gap.
-                if char['x0'] - prior['x1'] > max(18, min(prior['size'], char['size']) * 2.5):
+                if not prose_row and char['x0'] - prior['x1'] > max(18, min(prior['size'], char['size']) * 2.5):
                     segments.append([])
             segments[-1].append(char)
         for segment in segments:
@@ -298,6 +306,11 @@ def _is_running(line, width, height, page_number):
 def _graphic_candidates(page, lines):
     """Combine raster and vector primitives, guided by figure-caption anchors."""
     width, height = float(page.width), float(page.height)
+    def caption_column(caption, box):
+        split = caption.get('_split') or width / 2
+        column = caption.get('_column')
+        return (column not in ('left', 'right') or column == 'left' and box[2] <= split + 3
+                or column == 'right' and box[0] >= split - 3)
     primitives = []
     for obj in list(page.images) + list(page.rects) + list(page.curves) + list(page.lines):
         box = _box(obj)
@@ -336,14 +349,18 @@ def _graphic_candidates(page, lines):
         if above:
             nearest = max(above, key=lambda b: b[3])
             aligned = [b for b in components if b[3] <= cb[1] + 5 and b[3] >= nearest[1]
-                       and b[1] <= nearest[3] and b[0] >= 20 and b[2] <= width - 20]
+                       and b[1] <= nearest[3] and b[0] >= 20 and b[2] <= width - 20
+                       and caption_column(caption, b)]
             merged = _union(aligned or [nearest])
             if merged[2] - merged[0] > 55 and merged[3] - merged[1] > 40:
                 candidates.append(merged)
     # Prefer containing whole-figure regions over small inset duplicates.
     result = []
     for box in sorted(candidates, key=lambda b: -(b[2] - b[0]) * (b[3] - b[1])):
-        nearby_caption = any(0 <= l['bbox'][1] - box[3] < 100 for l in captions)
+        nearby_caption = any(0 <= l['bbox'][1] - box[3] < 100
+                             and min(l['bbox'][2], box[2]) > max(l['bbox'][0], box[0])
+                             and caption_column(l, box)
+                             for l in captions)
         raster_area = sum((i['x1'] - i['x0']) * (i['bottom'] - i['top']) for i in page.images
                           if _inside((i['x0'] + i['x1']) / 2, (i['top'] + i['bottom']) / 2, box))
         if not nearby_caption and raster_area < width * height * .03:
@@ -380,6 +397,44 @@ def _join_lines(lines):
     return value
 
 
+_EQUATION_NUMBER = re.compile(r'\(\s*(?:[A-Z]\.?\s*)?\d+(?:\.\d+)*[a-z]?\s*\)\s*$')
+
+
+def _numbered_equation(text):
+    """A trailing number is evidence only when the preceding text is math-like."""
+    match = _EQUATION_NUMBER.search(text)
+    if not match:
+        return False
+    body = text[:match.start()].strip().replace('1⁄4', '=').replace('¼', '=').replace('þ', '+')
+    words = re.findall(r'[A-Za-z]{3,}', re.sub(r'\(cid:\d+\)', '', body))
+    words = [w for w in words if w.lower() not in {'sin', 'cos', 'tan', 'exp', 'log', 'min', 'max', 'lim', 'arg', 'det', 'diag'}]
+    return bool(body and len(words) < 4 and not _PROSE_LEAD.match(body)
+                and not re.match(r'^(?:Fig|Table|Eq|Section|Theorem|Lemma)\b', body, re.I)
+                and (re.search(r'[=+−×÷∑∏∫∂∈≤≥^_{}\\]|\w\s*\(', body) or len(words) == 0))
+
+
+def _attach_equation_numbers(lines, width):
+    """Join separately extracted right-hand numbers to same-row math, never prose."""
+    result = list(lines)
+    for number in list(lines):
+        if not _EQUATION_NUMBER.fullmatch(number['text'].strip()):
+            continue
+        nb = number['bbox']
+        candidates = [line for line in result if line is not number
+                      and line.get('_column') == number.get('_column')
+                      and 0 <= nb[0] - line['bbox'][2] < width * (.65 if number.get('_column') == 'single' else .27)
+                      and abs((line['bbox'][1] + line['bbox'][3] - nb[1] - nb[3]) / 2) < max(6, number['size'])
+                      and _numbered_equation(line['text'] + ' ' + number['text'])]
+        if not candidates:
+            continue
+        body = min(candidates, key=lambda line: nb[0] - line['bbox'][2])
+        body['text'] += ' ' + number['text']
+        body['bbox'] = _union([body['bbox'], nb])
+        body['chars'] = body['chars'] + number['chars']
+        result.remove(number)
+    return result
+
+
 def _paragraphs(lines, width, body_size):
     groups = []
     for line in lines:
@@ -387,11 +442,12 @@ def _paragraphs(lines, width, body_size):
         ordinary_words = re.findall(r'[A-Za-z]{3,}', re.sub(r'\(cid:\d+\)', '', line['text']))
         ordinary_words = [word for word in ordinary_words
                           if not re.fullmatch(r'sin|cos|tan|arctan|exp|log|lim|max|min|[DW]?wall', word)]
-        line['equation'] = (('=' in line['text'] or line['math'] > .24
+        line['equation'] = (_numbered_equation(line['text']) or (('=' in line['text'] or line['math'] > .24
                              or '(cid:' in line['text'] or re.search(r'[∑∏∂∈≤≥]', line['text'])
                              or re.search(r'(?:ffi|fi){4,}', line['text']))
                             and len(ordinary_words) < 5 and len(line['text']) < 240
-                            and not _PROSE_LEAD.match(line['text']))
+                            and not _PROSE_LEAD.match(line['text'])
+                            and not re.match(r'^[A-Za-z]{3,}\s', line['text'])))
         is_heading = (len(line['text']) < 160 and
                       (line['size'] > body_size * 1.10 or line['bold'] > 0.72))
         line['heading'] = is_heading
@@ -403,11 +459,12 @@ def _paragraphs(lines, width, body_size):
             indent = box[0] - groups[-1][0]['bbox'][0]
             new_reference = bool(re.match(r'^\d{1,3}\.\s', line['text']))
             starts_caption = bool(_FIGURE_START.match(line['text']) or _TABLE_START.match(line['text']))
+            starts_item = bool(re.match(r'^[•·▪●‣]\s|^(?:\d+[.)]|\([a-z0-9]+\))\s', line['text']))
             start_new = (gap > max(5.5, previous['size'] * .7) or gap < -2
                          or not similar_size or line['heading'] != previous['heading']
                          or line['equation'] != previous.get('equation', False)
                          or (indent > 7 and previous['text'].endswith(('.', '!', '?')))
-                         or starts_caption or new_reference)
+                         or starts_caption or new_reference or starts_item)
             # Strong paragraph indentation often marks a boundary even if the
             # preceding paragraph ends in a citation rather than punctuation.
             if 7 < indent < 35 and abs(previous['bbox'][0] - groups[-1][0]['bbox'][0]) < 4:
@@ -418,6 +475,12 @@ def _paragraphs(lines, width, body_size):
                 start_new = True
             if line['equation'] and previous.get('equation'):
                 start_new = gap > max(9, previous['size']) or gap < -3
+            item_group = bool(re.match(r'^[•·▪●‣]\s|^(?:\d+[.)]|\([a-z0-9]+\))\s', groups[-1][0]['text']))
+            if (item_group and not starts_item and not starts_caption and not line['equation']
+                    and -3 <= gap <= max(6, body_size * .65)
+                    and 0 <= box[0] - groups[-1][0]['bbox'][0] < 35
+                    and line.get('_column') == previous.get('_column')):
+                start_new = False
             if not start_new:
                 groups[-1].append(line)
                 continue
@@ -429,8 +492,7 @@ def _paragraphs(lines, width, body_size):
                              and (len(text) < 200 or all(x['bold'] > .72 for x in group))) else 'paragraph'
         if _FIGURE_START.match(text) or _TABLE_START.match(text):
             kind = 'caption'
-        math_ratio = sum(x['math'] * len(x['chars']) for x in group) / max(1, sum(len(x['chars']) for x in group))
-        equation = any(x.get('equation') for x in group) or (math_ratio > .24 and len(re.findall(r'[A-Za-z]{3,}', text)) < 5)
+        equation = any(x.get('equation') for x in group)
         blocks.append({'text': text, 'kind': kind, 'bbox': _union([x['bbox'] for x in group]),
                        '_lines': group, 'is_formula': equation})
     return blocks
@@ -439,7 +501,7 @@ def _paragraphs(lines, width, body_size):
 def _ordered_blocks(lines, width, body_size, figure_boxes):
     # Full-width figures and captions create horizontal reading zones. Within
     # each zone, preserve left-column then right-column reading order.
-    content = [line for line in lines if not any(_inside(
+    content = [line for line in _attach_equation_numbers(lines, width) if not any(_inside(
         (line['bbox'][0] + line['bbox'][2]) / 2,
         (line['bbox'][1] + line['bbox'][3]) / 2, b) for b in figure_boxes)]
     if not content:
@@ -580,6 +642,11 @@ def _merge_formula_regions(blocks):
         while index < len(blocks):
             candidate = blocks[index]
             box = _union([b['bbox'] for b in group])
+            # Adjacent columns and separately numbered equations are distinct regions.
+            if (candidate['bbox'][0] > box[2] + 12 or box[0] > candidate['bbox'][2] + 12):
+                break
+            if any(_EQUATION_NUMBER.search(b['text']) for b in group) and _numbered_equation(candidate['text']):
+                break
             if (not candidate.get('is_formula') and not fragment(candidate)):
                 break
             if candidate['bbox'][1] - box[3] > 15 or box[1] - candidate['bbox'][3] > 15:
@@ -593,6 +660,27 @@ def _merge_formula_regions(blocks):
             block['_lines'] = [line for b in group for line in b['_lines']]
         output.append(block)
     return output
+
+
+def _merge_prose_tails(blocks):
+    """A short lowercase continuation on the next line belongs to its sentence."""
+    result = []
+    for block in blocks:
+        if result:
+            previous = result[-1]
+            a, b = previous['bbox'], block['bbox']
+            if (previous['kind'] == block['kind'] == 'paragraph'
+                    and not previous.get('is_formula') and not block.get('is_formula')
+                    and not previous.get('is_table') and not block.get('is_table')
+                    and block['text'][:1].islower()
+                    and not re.search(r'[.!?:;]\s*$', previous['text'])
+                    and abs(a[0] - b[0]) < 18 and -2 <= b[1] - a[3] <= 6):
+                previous['text'] = _join_lines([{'text': previous['text']}, {'text': block['text']}])
+                previous['bbox'] = _union([a, b])
+                previous['_lines'].extend(block['_lines'])
+                continue
+        result.append(block)
+    return result
 
 
 def _merge_frontmatter(blocks, lines, author_seed):
@@ -716,7 +804,22 @@ def extract_document(source_path, asset_dir):
             body_sizes = [round(c['size'], 1) for c in page.chars if c.get('text', '').isalpha() and 6 <= c['size'] <= 14]
             body_size = statistics.mode(body_sizes) if body_sizes else 9
             figure_boxes = _graphic_candidates(page, visible_lines)
-            local = _merge_formula_regions(_merge_captions(_ordered_blocks(visible_lines, width, body_size, figure_boxes)))
+            from pdf_regions import table_regions, numbered_regions, contains, reference_blocks, algorithm_regions
+            algorithms = algorithm_regions(page, visible_lines)
+            tables = table_regions(page, visible_lines)
+            table_boxes = [b['bbox'] for b in tables + algorithms]
+            figure_boxes = [b for b in figure_boxes if not any(contains(t, b) for t in table_boxes)]
+            remaining = [l for l in visible_lines if not any(contains(b, l['bbox']) for b in table_boxes + figure_boxes)]
+            equations = numbered_regions(remaining, width)
+            owned = {id(l) for b in equations for l in b['_lines']}
+            remaining = [l for l in remaining if id(l) not in owned]
+            local = _merge_prose_tails(_merge_formula_regions(_merge_captions(_ordered_blocks(remaining, width, body_size, figure_boxes))))
+            local = reference_blocks(local, references)
+            # Insert source regions geometrically without passing their text through paragraph merging.
+            for region in equations + tables + algorithms:
+                index = next((i for i, b in enumerate(local) if b['bbox'][1] > region['bbox'][1]
+                              and b['bbox'][0] >= region['bbox'][0] - width * .3), len(local))
+                local.insert(index, region)
             if number == 1:
                 local = _merge_frontmatter(local, lines, str((pdf.metadata or {}).get('Author', '')).strip())
             if not local and not page.chars:
@@ -725,20 +828,27 @@ def extract_document(source_path, asset_dir):
                 first_blocks, first_lines = local, lines
             for index, block in enumerate(local, 1):
                 block['id'], block['page'] = f'p{number}-b{index}', number
-                if re.fullmatch(r'References|Bibliography|Literature cited', block['text'], re.I):
+                if layout_rules.REFERENCE_HEADING.fullmatch(block['text']):
                     references = True
-                elif re.match(r'^(Acknowledgements|Acknowledgments|Author contributions|Competing interests|Additional information|Publisher.s note)\b', block['text'], re.I):
+                elif layout_rules.REFERENCE_END.match(block['text']):
                     references = False
                 if references and block['kind'] != 'heading':
                     block['kind'] = 'reference'
                 box = _norm(block['bbox'], width, height)
-                if block['is_formula']:
+                if block.get('source_region_kind') == 'algorithm':
+                    block['image'] = _crop_extracted_region(asset_dir, number, box, f'algorithm-{number:03}-{index:03}.jpg')
+                elif block['is_formula']:
+                    block['source_text'] = block['text']
                     image = _crop_extracted_region(asset_dir, number, box, f'equation-{number:03}-{index:03}.jpg')
                     if image:
                         block['image'] = image
                         block['text'] = '[公式：请对照原文图像]'
                     else:
                         warnings.append(f'第 {number} 页有公式位于页面范围之外；请对照原 PDF。')
+                elif block.get('is_table'):
+                    image = _crop_extracted_region(asset_dir, number, box, f'table-{number:03}-{index:03}.jpg')
+                    if image:
+                        block['image'] = image
                 elif '(cid:' in block['text']:
                     block['has_unparsed_math'] = True
                     image = _crop_extracted_region(asset_dir, number, box, f'math-source-{number:03}-{index:03}.jpg')
@@ -747,12 +857,6 @@ def extract_document(source_path, asset_dir):
                     else:
                         warnings.append(f'第 {number} 页有数学符号位于页面范围之外；请对照原 PDF。')
                     block['text'] = re.sub(r'\(cid:\d+\)', '⟦原文数学符号⟧', block['text'])
-                elif block.get('is_table'):
-                    image = _crop_extracted_region(asset_dir, number, box, f'table-{number:03}-{index:03}.jpg')
-                    if image:
-                        block['image'] = image
-                    else:
-                        warnings.append(f'第 {number} 页有表格位于页面范围之外；请对照原 PDF。')
                 block['bbox'] = box
                 geometry = ','.join(str(round(v, 5)) for v in box)
                 block['source_key'] = f'p{number}-g' + hashlib.sha256(geometry.encode()).hexdigest()[:12]
@@ -802,6 +906,8 @@ def extract_document(source_path, asset_dir):
     cover = max(figures, key=lambda f: f['score'])['path'] if figures else 'page-001.jpg'
     if not figures:
         warnings.append('未可靠检测到论文插图，暂以首页为封面；可在原文中查看图像。')
-    return {'metadata': metadata, 'pages': pages, 'blocks': blocks, 'figures': figures,
+    result = {'metadata': metadata, 'pages': pages, 'blocks': blocks, 'figures': figures,
             'cover': cover, 'warnings': warnings,
-            'extraction': {'version': 4, 'method': 'gutter-aware-two-column', 'ocr': False}}
+            'extraction': {'version': layout_rules.EXTRACTION_VERSION, 'method': 'gutter-aware-two-column', 'ocr': False}}
+    result['layout_quality'] = layout_rules.audit(result)
+    return result

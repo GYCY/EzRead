@@ -7,8 +7,7 @@ const readerTextUI = { popup: null, editor: null, selection: null, request: null
 function readerOriginalText(block) { return Object.hasOwn(block, "text_override") ? block.text_override : asText(block.text); }
 function readerTextLanguage(block) { return readerRuntime.textLanguage === "original" ? "original" : block.translation || block.translation_manually_edited ? "translation" : "original"; }
 function readerTextValue(block, language = readerTextLanguage(block)) { return language === "original" ? readerOriginalText(block) : asText(block.translation); }
-function readerTextSpan(block, attrs = {}) {
-  const language = readerTextLanguage(block);
+function readerTextSpan(block, attrs = {}, language = readerTextLanguage(block)) {
   return el("span", { ...attrs, class: `reader-source-text ${block.highlight ? "legacy-highlighted" : ""} ${attrs.class || ""}`,
     dataset: { sourceId: block.id, page: block.page, language } }, readerTextValue(block, language));
 }

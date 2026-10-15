@@ -1619,3 +1619,29 @@ dialog {
     grid-column: 1 / -1;
   }
 }
+/* Per-paper terminology and source-formula review. */
+.reader-quality-dialog { width: min(920px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); }
+.reader-quality-dialog[open] { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+.reader-quality-dialog > .dialog-heading, .reader-quality-dialog > .form-actions { flex-shrink: 0; }
+.reader-quality-dialog .form-actions { flex-wrap: wrap; }
+.reader-quality-body { overflow: auto; min-height: 0; padding: 4px 12px 12px 4px; }
+.quality-entry { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 16px 0; border-bottom: 1px solid var(--border); }
+.quality-entry > p, .quality-entry > img { grid-column: 1 / -1; overflow-wrap: anywhere; white-space: pre-wrap; }
+.quality-entry input:not([type="checkbox"]) { width: 100%; min-width: 0; }
+@media (max-width: 650px) { .quality-entry { grid-template-columns: minmax(0, 1fr); } }
+.reader-table-scroll { overflow-x: auto; max-width: 100%; }
+.reader-chinese-table { border-collapse: collapse; width: 100%; font-size: .9em; }
+.reader-chinese-table td { padding: .45em .7em; border: 1px solid var(--border, #ddd); vertical-align: top; }
+.reader-table-details { margin-block: 12px; }
+.reader-table-details summary { cursor: pointer; }
+.reader-table-image { width: 100%; height: auto; object-fit: contain; }
+.quality-crop-canvas { position: relative; touch-action: none; user-select: none; margin-top: 12px; cursor: crosshair; }
+.quality-crop-canvas > img { width: 100%; height: auto; display: block; }
+.quality-crop-selection { position: absolute; border: 2px solid #267cbd; background: #267cbd22; pointer-events: none; box-sizing: border-box; }
+
+.region-translation-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.quality-existing-region { position: absolute; border: 2px solid var(--green); background: #4c80621a; padding: 0; border-radius: 2px; cursor: pointer; min-height: 0; box-sizing: border-box; }
+
+.quality-pdf-page { margin-block: 16px 24px; }
+.quality-page-label { color: var(--muted); font-size: .9em; margin-block: 12px; }
+.quality-page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }

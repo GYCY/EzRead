@@ -248,6 +248,41 @@ def handler_for(app: ApplicationContext):
                 if path == '/api/journal-catalogue/proposals':
                     self.send_json(journal_catalogue.start_proposal(app, self.read_json().get('instruction')), 202)
                     return
+                table_match = re.fullmatch(r'/api/papers/([a-f0-9]{16})/tables', path)
+                if table_match:
+                    from . import tables
+                    updated = tables.translate(app, table_match.group(1), self.read_json())
+                    self.send_json({'paper': app.public_doc(updated, True)})
+                    return
+                quality_match = re.fullmatch(r'/api/papers/([a-f0-9]{16})/(terminology|formulas)', path)
+                if quality_match:
+                    from . import terminology, formulas
+                    pid, section = quality_match.groups()
+                    data = self.read_json()
+                    action = data.get('action')
+                    doc = app.get_doc(pid)
+                    if section == 'terminology' and action == 'save':
+                        self.send_json({'terminology': terminology.save(app, pid, data)})
+                    elif section == 'terminology' and action == 'build':
+                        self.send_json({'terminology': terminology.ensure(app, pid, terminology.configuration(app, doc), app.SHUTDOWN)})
+                    elif section == 'formulas' and action == 'correct':
+                        updated = formulas.correct(app, pid, data)
+                        self.send_json({'paper': app.public_doc(updated, True)})
+                    elif section == 'formulas' and action == 'translate-missing':
+                        updated, errors = formulas.translate_missing(app, pid)
+                        self.send_json({'paper': app.public_doc(updated, True), 'errors': errors})
+                    elif section == 'formulas' and action == 'repair-paragraphs':
+                        from . import paragraphs
+                        updated = paragraphs.repair(app, pid)
+                        self.send_json({'paper': app.public_doc(updated, True)})
+                    elif section == 'terminology' and action == 'preview':
+                        self.send_json({'preview': terminology.review(app, pid)})
+                    elif section == 'terminology' and action == 'apply':
+                        updated = terminology.apply_review(app, pid, data)
+                        self.send_json({'paper': app.public_doc(updated, True)})
+                    else:
+                        raise ValueError('无效的阅读核对操作。')
+                    return
                 text_match = re.fullmatch(r'/api/papers/([a-f0-9]{16})/text-actions', path)
                 if text_match:
                     from . import text_actions

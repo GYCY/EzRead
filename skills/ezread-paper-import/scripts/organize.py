@@ -5,7 +5,7 @@ import json
 import re
 from pathlib import Path
 
-VERSION = 1
+VERSION = 2
 ROLES = ('title', 'authors', 'affiliations', 'article_info', 'abstract',
          'section_heading', 'paragraph', 'caption', 'table', 'equation', 'reference', 'furniture')
 FRONT = ('title', 'authors', 'affiliations', 'article_info', 'abstract')
@@ -134,6 +134,12 @@ def spatial_order(blocks):
 
 
 def joinable(a, b, role):
+    if a.get('formula_continuation') or b.get('formula_continuation'):
+        return False
+    if re.match(r'^[•·▪●‣]\s|^(?:\d+[.)]|\([a-z0-9]+\))\s', b.get('text', '')):
+        return False
+    if a.get('source_parent_ids') or b.get('source_parent_ids'):
+        return False
     if role in ('title', 'authors', 'abstract'):
         # Structured abstracts keep internal headings/labels separate.
         return role != 'abstract' or not (compact(a.get('text', '')) == 'abstract' or
@@ -154,7 +160,7 @@ def joinable(a, b, role):
     continuous = same_page and same_column and -.02 < bq[1] - aq[3] < .055
     unfinished = bool(tail and not re.search(r'[.!?:;][”"\)\]\d\s]*$', tail))
     return bool((small and same_row) or (unfinished and (continuous or boundary) and
-                (lead[:1].islower() or len(lead) < 35 or tail.endswith('-'))))
+                (boundary or lead[:1].islower() or len(lead) < 35 or tail.endswith('-'))))
 
 
 def audit_structure(doc, structure):

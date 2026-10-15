@@ -57,6 +57,14 @@ async function main() {
     {id:'e',page:2,bbox:[.1,.1,.9,.8]}
   ],figures:[{id:'wide',page:1,url:'/f.jpg',bbox:[.1,.5,.9,.8]}]};
   const sourcePages=context.readerSourcePages(originalPages);
+  const groupedPages = context.readerSourcePages({pages: [{number: 1}, {number: 2}], figures: [], blocks: [
+    {id: 'first', page: 1, bbox: [.1,.7,.4,.9]}, {id: 'continued', page: 2, bbox: [.1,.1,.4,.2]},
+    {id: 'next-item', page: 2, bbox: [.1,.3,.4,.4]}]}, {sections: [{entries: [
+      {id: 'first', role: 'paragraph', source_ids: ['first', 'continued']},
+      {id: 'next-item', role: 'paragraph', source_ids: ['next-item']}]}]});
+  const groupedItems = groupedPages.flatMap(p => p.bands.flatMap(b => b.full ? [b.full] : [...b.left, ...b.right]));
+  assert.equal(groupedItems.length, 2, 'A source paragraph must render once across page boundaries.');
+  assert.deepEqual(Array.from(groupedItems[0].entry.source_ids), ['first', 'continued']);
   assert.equal(sourcePages.length,2);assert.equal(sourcePages[0].twoColumns,true);assert.equal(sourcePages[1].twoColumns,false);
   assert.equal(sourcePages[0].bands[0].left.length,2);assert.equal(sourcePages[0].bands[0].right.length,2);
   assert.equal(sourcePages[0].bands[1].full.figure.id,'wide');assert.equal(sourcePages[1].bands[0].full.block.id,'e');

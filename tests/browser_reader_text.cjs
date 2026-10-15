@@ -404,10 +404,11 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
     const membership = await page.evaluate(()=>{
       const all=[...document.querySelectorAll('.reader-source-text')];
       return {count:all.length,unique:new Set(all.map(n=>n.dataset.sourceId)).size,
-        valid:all.every(n=>Number(n.closest('.reader-source-page').dataset.page)===Number(state.reader.blocks.find(b=>b.id===n.dataset.sourceId).page)),
+        valid:all.every(n=>Number(n.dataset.page)===Number(state.reader.blocks.find(b=>b.id===n.dataset.sourceId).page)
+          && n.closest('.translation-block').dataset.sourcePages.split(' ').includes(n.dataset.page)),
         expected:state.reader.blocks.filter(b=>!b.is_formula||!b.image_url).length};
     });
-    assert(membership.valid); assert.equal(membership.count,membership.unique); assert.equal(membership.count,membership.expected);
+    assert(membership.valid,'Merged paragraphs retain each source span’s page and navigation anchors.'); assert.equal(membership.count,membership.unique); assert.equal(membership.count,membership.expected);
     assert.equal(await page.locator('.reader-source-page').first().getAttribute('data-columns'),'2');
     assert(await page.locator('.reader-inline-figure').evaluateAll(nodes=>nodes.every(n=>n.dataset.page===n.closest('.reader-source-page').dataset.page)),'Figures stay on their exact source page.');
     const beforePageHeight=await page.locator('.reader-source-page').first().evaluate(n=>n.getBoundingClientRect().height);
@@ -484,6 +485,32 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
     await page.mouse.move(1000,600);await page.mouse.wheel(0,160);
     await page.waitForFunction(y=>scrollY>y,libraryBefore.y);
     checks.push('paper detail and reader hide background scrollbar, lock edge wheel, retain inner scrolling and library position, including nested Escape close');
+    const quota={status:'fresh',updated_at:'2026-10-14T07:21:00Z',checked_at:'2026-10-14T07:22:00Z',buckets:[{id:'codex',name:'Codex',windows:[{window_minutes:300,used_percent:20},{window_minutes:10080,used_percent:5,remaining_percent:95,resets_at:1792485420}]}]};
+    const requests=[];
+    page.on('request',request=>requests.push(request.url()));
+    await page.route('**/api/usage?refresh=1',route=>route.fulfill({json:quota}));
+    await page.evaluate(quota=>{state.usage=quota;renderQueue();openDialog('#queue-dialog');},quota);
+    const queue=page.locator('#queue-dialog');
+    assert.equal(await queue.locator('#codex-status, #refresh-status').count(),0);
+    assert.equal(await queue.getByRole('button',{name:'刷新',exact:true}).count(),1);
+    assert.match(await queue.innerText(),/已用 5%/);assert.match(await queue.innerText(),/剩余 95%/);
+    assert(!/账户共享|ChatGPT 订阅|最近检查|5 小时窗口/.test(await queue.innerText()));
+    assert(await page.locator('#queue-list').innerText(),'Removing the connection panel does not stop task rendering.');
+    await queue.getByRole('button',{name:'刷新',exact:true}).click();
+    await page.waitForFunction(()=>!queueRefreshBusy&&!usageBusy);
+    assert(requests.some(url=>url.endsWith('/api/usage?refresh=1')));
+    assert(requests.some(url=>url.endsWith('/api/status')));
+    assert(requests.some(url=>url.includes('/api/papers')),'The only refresh also updates tasks.');
+    await page.screenshot({path:path.join(root,'work/queue-weekly-usage.png')});
+    await page.evaluate(()=>{state.usage.status='stale';state.usage.error='offline';renderUsagePanels();});
+    assert.match(await queue.innerText(),/刷新失败，当前为上次记录/);
+    assert.match(await queue.innerText(),/剩余 95%/);
+    await page.evaluate(()=>{state.usage.buckets[0].windows=state.usage.buckets[0].windows.filter(w=>w.window_minutes!==10080);state.usage.status='fresh';delete state.usage.error;renderUsagePanels();});
+    assert.match(await queue.innerText(),/七天用量暂不可用/);
+    assert.equal(await queue.getByRole('progressbar').count(),0);
+    assert.match(await page.evaluate(()=>usagePanel(false).textContent),/账户共享 Codex 用量/);
+    assert.match(await page.evaluate(()=>usagePanel(false).textContent),/5 小时窗口/);
+    checks.push('compact weekly quota, one combined refresh, stale/missing seven-day states, intact task rendering and unchanged settings usage');
     assert.deepEqual(errors,[]);
     fs.writeFileSync(path.join(root,'work/reader-text-browser-verification.json'),JSON.stringify({checks,errors,realModelCalls:0,realLibraryWrites:0,mockedTranslationCalls:(await apiState()).calls.length},null,2));
     console.log(JSON.stringify({checks:checks.length,errors,realModelCalls:0,realLibraryWrites:0}));

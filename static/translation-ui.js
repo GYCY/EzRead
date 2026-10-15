@@ -136,6 +136,7 @@ function openTranslationSetup(papers) {
   }
   retranslate.addEventListener("change", updateMode);
   const content = el("div", {}, el("div", { class: "dialog-heading" }, el("h2", {}, single ? "确认全文翻译" : `确认批量翻译 · ${papers.length} 篇`), iconButton("close", "关闭翻译设置", () => closeDialog("#translation-dialog"))), single ? el("p", { class: "translation-paper-title" }, titleOf(single)) : null, single && existing ? el("p", { class: "small muted" }, `原任务配置：${configLabel(translationOf(single).config)}`) : null, existing ? el("label", { class: "translation-mode-choice" }, retranslate, "使用新配置整篇重新翻译") : null, hint, picker.root, el("div", { class: "form-actions" }, button("取消", () => closeDialog("#translation-dialog")), start));
+  content.insertBefore(el("p", { class: "small muted" }, "开始后先自动扫描全文建立本篇术语表，再逐段翻译；准备阶段也会使用模型用量。可在阅读器中查看和修改术语。"), content.lastElementChild);
   $("#translation-content").replaceChildren(content); updateMode(); openDialog("#translation-dialog");
   $("#translation-dialog").addEventListener("close", () => picker.dispose(), { once: true });
 }

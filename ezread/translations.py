@@ -15,7 +15,8 @@ def translation_snapshot(app: ApplicationContext, doc):
     blocks = {b['id']: {k: copy.deepcopy(b[k]) for k in app.TRANSLATION_FIELDS if k in b} for b in doc.get('blocks', [])}
     return {'id': secrets.token_hex(8), 'created_at': app.now(), 'config': copy.deepcopy(current.get('config')),
             'mixed': current.get('mixed', bool(any(b.get('translation') for b in doc.get('blocks', [])) and not current)),
-            'block_count': sum(bool(v.get('translation', '').strip()) for v in blocks.values()), 'blocks': blocks}
+            'block_count': sum(bool(v.get('translation', '').strip()) for v in blocks.values()), 'blocks': blocks,
+            'table_translations': copy.deepcopy(doc.get('table_translations', {}))}
 
 
 def archive_translation(app: ApplicationContext, doc):
@@ -67,6 +68,8 @@ def restore_translation(app: ApplicationContext, pid, version_id):
                 block.pop(key, None)
             block.update(copy.deepcopy(saved))
         doc['translation_current'] = {'config': copy.deepcopy(version.get('config')), 'mixed': version.get('mixed', False), 'restored_from': version_id, 'created_at': app.now()}
+        if 'table_translations' in version:
+            doc['table_translations'] = copy.deepcopy(version['table_translations'])
         config = copy.deepcopy(version.get('config'))
         doc['translation'] = {'status': 'paused', 'error': '', 'mode': 'translate', 'config': config}
         counts = app.translation_counts(doc)
@@ -121,15 +124,25 @@ def prepare_translation(app: ApplicationContext, doc, options=None):
     doc.setdefault('translation_runs', {})[run_id] = {'config': copy.deepcopy(config), 'created_at': task['created_at']}
     if retranslate:
         task['staging'] = {}
+        task.pop('table_staging', None)
 
 
 def execute_translation(app: ApplicationContext, pid, event):
     import paper_ai
+    import layout_rules
+    from . import terminology, formulas, tables
     doc = app.get_doc(pid)
     task = doc['translation']
     config, run_id = copy.deepcopy(task['config']), task['run_id']
+    quality = layout_rules.audit(formulas.display_doc(doc))
+    app.update_doc(pid, lambda d: d.update(layout_quality=quality))
+    app.update_doc(pid, lambda d: d['translation'].update(status='running', phase='terminology', error=''))
+    terminology.ensure(app, pid, config, event)
+    doc = formulas.display_doc(app.get_doc(pid))
+    task = doc['translation']
+    app.update_doc(pid, lambda d: d['translation'].update(phase='translation'))
     staging = task.get('staging')
-    targets = [b for b in doc.get('blocks', []) if b.get('kind') != 'reference' and not b.get('is_formula') and original_text(b).strip()]
+    targets = [b for b in doc.get('blocks', []) if b.get('kind') != 'reference' and not b.get('is_formula') and not b.get('is_table') and not b.get('formula_continuation') and not b.get('region_retained') and not b.get('figure_caption_number') and b.get('source_region_kind') not in ('figure', 'algorithm') and original_text(b).strip()]
     staged_hashes = task.get('staging_source_hashes', {})
     if isinstance(staging, dict):
         pending = [b for b in targets if not staging.get(b['id'], '').strip() or
@@ -140,6 +153,9 @@ def execute_translation(app: ApplicationContext, pid, event):
     for batch in app.batches(pending):
         if event.is_set():
             break
+        latest = app.get_doc(pid)
+        if terminology.ledger(latest)['revision'] != terminology.ledger(doc)['revision']:
+            raise ValueError('术语表已修改，已保留进度；继续翻译将使用新术语表。')
         def remember_thread(tid):
             task['thread_id'] = tid
             app.update_doc(pid, lambda d: d['translation'].update(thread_id=tid)
@@ -153,6 +169,8 @@ def execute_translation(app: ApplicationContext, pid, event):
             active = d['translation']
             if active.get('run_id') != run_id:
                 raise ValueError('翻译任务已变更，本批结果未覆盖新任务。')
+            if terminology.ledger(d)['revision'] != terminology.ledger(doc)['revision']:
+                raise ValueError('术语表已修改，本批旧结果未提交，请继续翻译。')
             active['thread_id'] = thread_id
             if isinstance(active.get('staging'), dict):
                 active['staging'].update(result)
@@ -164,6 +182,25 @@ def execute_translation(app: ApplicationContext, pid, event):
                                      translation_source_hash=digest(original_text(next(b for b in batch if b['id'] == block['id']))))
         app.update_doc(pid, merge)
         task['thread_id'] = thread_id
+    table_targets = [b for b in doc['blocks'] if b.get('is_table') and not b.get('formula_continuation') and not b.get('region_retained')]
+    for block in table_targets:
+        if event.is_set():
+            break
+        latest = app.get_doc(pid)
+        active = latest['translation']
+        saved = active.get('table_staging', {}).get(block['id'])
+        if saved and saved.get('source_hash') == tables.fingerprint(block):
+            continue
+        if active.get('mode') != 'retranslate' and block.get('table_translation'):
+            result = block['table_translation']
+        else:
+            app.update_doc(pid, lambda d: d['translation'].update(phase='tables'))
+            result = tables.generate(block, config, event)
+        def stage_table(d):
+            if d['translation'].get('run_id') != run_id:
+                raise ValueError('翻译任务已变更。')
+            d['translation'].setdefault('table_staging', {})[block['id']] = result
+        app.update_doc(pid, stage_table)
     def finish(d):
         active = d['translation']
         if active.get('run_id') != run_id:
@@ -171,6 +208,11 @@ def execute_translation(app: ApplicationContext, pid, event):
         if event.is_set():
             active.update(status='paused', error='')
             return
+        current_tables = {b['id']: b for b in formulas.display_doc(d)['blocks'] if b.get('is_table')}
+        for block in table_targets:
+            saved = active.get('table_staging', {}).get(block['id'], {})
+            if saved.get('source_hash') != tables.fingerprint(current_tables.get(block['id'], {})):
+                raise ValueError('表格来源已变化，译文已保留为草稿。')
         if isinstance(active.get('staging'), dict):
             if any(not active['staging'].get(b['id'], '').strip() for b in targets):
                 raise ValueError('重译尚未完整，继续保留当前可读版本。')
@@ -189,9 +231,13 @@ def execute_translation(app: ApplicationContext, pid, event):
                                  translation_source_hash=active.get('staging_source_hashes', {}).get(block['id'], digest(next((original_text(b) for b in targets if b['id'] == block['id']), block.get('text', '')))))
             del active['staging']
             active.pop('staging_source_hashes', None)
-        translated = [b for b in d['blocks'] if b.get('kind') != 'reference' and not b.get('is_formula') and b.get('text', '').strip()]
+        target_ids = {b['id'] for b in targets}
+        translated = [b for b in d['blocks'] if b['id'] in target_ids]
         sources = [d.get('translation_runs', {}).get(b.get('translation_run_id'), {}).get('config') for b in translated]
         homogeneous = bool(sources) and all(source is not None and source == sources[0] for source in sources)
         d['translation_current'] = {'config': copy.deepcopy(sources[0]) if homogeneous else None, 'mixed': not homogeneous, 'created_at': app.now()}
-        active.update(status='completed', error='')
+        if active.get('table_staging'):
+            d.setdefault('table_translation_history', []).append(copy.deepcopy(d.get('table_translations', {})))
+            d.setdefault('table_translations', {}).update(active.pop('table_staging'))
+        active.update(status='completed', phase='', error='')
     app.update_doc(pid, finish)

@@ -43,6 +43,8 @@ class TranslationTests(unittest.TestCase):
                         patch.object(codex_models, 'resolve_config', side_effect=resolve)]
         for mock in self.patches:
             mock.start()
+        preparation = patch('ezread.terminology.generate', return_value=[])
+        preparation.start(); self.addCleanup(preparation.stop)
         server.init_db()
         self.doc = {'id': PID, 'hash': 'test-hash', 'title': 'Synthetic test document', 'deleted': False,
                     'pages': [{'number': 1}, {'number': 2}], 'figures': [], 'notes': 'paper note',

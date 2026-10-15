@@ -30,7 +30,43 @@ function usagePanel(showRefresh = true) {
   if (usage) panel.append(el("p", { class: "usage-stamp" }, `${status === "stale" ? "上次成功更新" : "更新"}：${timeLabel(usage.updated_at)}${usage.checked_at ? ` · 最近检查：${timeLabel(usage.checked_at)}` : ""}`));
   return panel;
 }
-function renderUsagePanels() { ["#usage-status", "#settings-usage"].forEach(selector => { const node = $(selector); if (node) node.replaceChildren(usagePanel(selector !== "#settings-usage")); }); }
+let queueRefreshBusy = false, queueRefreshError = "";
+async function refreshQueue() {
+  if (queueRefreshBusy) return;
+  queueRefreshBusy = true; queueRefreshError = ""; renderUsagePanels();
+  try {
+    const results = await Promise.allSettled([refreshStatus(), loadLibrary()]);
+    if (results.some(result => result.status === "rejected")) queueRefreshError = "任务状态刷新失败，请重试。";
+    // Finish a background request first, then force a fresh quota query.
+    if (usageRequest) await usageRequest;
+    await loadUsage(true);
+  } finally { queueRefreshBusy = false; renderQueue(); renderUsagePanels(); }
+}
+function queueUsagePanel() {
+  const usage = state.usage, status = usage?.status || "loading";
+  const bucket = usage?.buckets?.find(b => [b.id, b.name].some(value => String(value || "").toLowerCase() === "codex"));
+  const window = bucket?.windows?.find(w => Number(w.window_minutes) === 10080);
+  const busy = queueRefreshBusy || usageBusy || usage?.refreshing;
+  const panel = el("div", {}, el("div", { class: "usage-heading" }, el("h3", {}, "Codex · 7 天用量"),
+    button(busy ? "正在刷新…" : "刷新", event => act(refreshQueue, event.currentTarget), "secondary", "clock", { disabled: busy, id: "queue-refresh" })));
+  if (window) {
+    const used = percentage(window.used_percent), provided = percentage(window.remaining_percent);
+    const remaining = provided ?? (used === null ? null : 100 - used);
+    const label = value => value === null ? "—" : `${Number(value.toFixed(1))}%`;
+    panel.append(el("div", { class: "usage-numbers" }, el("span", {}, `已用 ${label(used)}`), el("strong", {}, `剩余 ${label(remaining)}`)),
+      used === null ? document.createDocumentFragment() : el("div", { class: "progress-track", role: "progressbar", "aria-label": "Codex 七天用量已用", "aria-valuenow": used, "aria-valuemin": 0, "aria-valuemax": 100 }, el("div", { class: "progress-fill", style: { width: `${used}%` } })),
+      el("div", { class: "usage-reset" }, window.resets_at ? `重置：${timeLabel(window.resets_at, true)}` : "未提供重置时间"));
+  } else panel.append(el("p", { class: "usage-note" }, status === "loading" ? "正在读取七天用量…" : "七天用量暂不可用"));
+  if (status === "stale" || usage?.error) panel.append(el("p", { class: "usage-note" }, window ? "刷新失败，当前为上次记录" : "用量刷新失败，请稍后重试。"));
+  if (usage?.ordinary_usage_allowed === false) panel.append(el("p", { class: "usage-note" }, "账户当前报告普通用量受限。"));
+  if (window && usage.updated_at) panel.append(el("p", { class: "usage-stamp" }, `更新：${timeLabel(usage.updated_at)}`));
+  if (queueRefreshError) panel.append(el("p", { class: "error-text" }, queueRefreshError));
+  return panel;
+}
+function renderUsagePanels() {
+  $("#usage-status")?.replaceChildren(queueUsagePanel());
+  $("#settings-usage")?.replaceChildren(usagePanel(false));
+}
 function loadUsage(force = false) {
   if (usageRequest) return usageRequest;
   usageBusy = true; renderUsagePanels();
@@ -48,7 +84,7 @@ function codexStatusPanel() {
   return el("div", {}, el("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "15px", marginBottom: "8px" } }, el("h3", {}, "ChatGPT 订阅 · Codex"), el("span", { class: `connection-state ${ready ? "" : "offline"}` }, el("i", { class: "status-dot" }), ready ? "已连接" : s.available ? "需要登录" : "尚未就绪")), el("p", {}, ready ? "" : s.message || (s.available ? "Codex 尚未登录" : "Codex 不可用")), s.login_command ? el("pre", {}, s.login_command) : null);
 }
 function renderQueue() {
-  const panel = $("#codex-status"); if (!panel) return; panel.replaceChildren(codexStatusPanel());
+  if (!$("#queue-list")) return;
   const jobs = state.papers.filter(p => { const t = translationOf(p); return t.status && !["idle", "none"].includes(t.status) || t.done > 0 || p.summarize_status; });
   jobs.sort((a, b) => Number(ACTIVE_STATUSES.has(translationOf(b).status)) - Number(ACTIVE_STATUSES.has(translationOf(a).status)) || dateMs(b.updated_at) - dateMs(a.updated_at));
   $("#queue-list").replaceChildren(...(jobs.length ? jobs.map(p => {

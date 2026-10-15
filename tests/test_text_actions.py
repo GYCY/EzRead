@@ -251,7 +251,7 @@ class TextActionTests(unittest.TestCase):
         def concurrent(con_factory, pid, doc, batch, config, thread_id, **kwargs):
             self.apply('revise', [self.selection(language='translation', quote='第一')], replacement='手动修订')
             return 'mock-thread', {b['id']: 'stale model result' for b in batch}
-        with patch.object(paper_ai, 'translate_batch', side_effect=concurrent), self.assertRaisesRegex(ValueError, '未覆盖新内容'):
+        with patch('ezread.terminology.generate', return_value=[]), patch.object(paper_ai, 'translate_batch', side_effect=concurrent), self.assertRaisesRegex(ValueError, '未覆盖新内容'):
             server.execute_translation(PID, threading.Event())
         current = server.get_doc(PID)
         self.assertTrue(current['blocks'][0]['translation'].startswith('手动修订'))

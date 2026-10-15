@@ -29,6 +29,7 @@ progress_mode = ''
 
 def main():
     native = '--native' in sys.argv
+    quality = '--quality' in sys.argv
     run_id = secrets.token_hex(8)
     work = ROOT / 'work'; work.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='reader-text-browser-', dir=work, ignore_cleanup_errors=True) as folder:
@@ -86,6 +87,30 @@ def main():
         library = server.LIBRARY / PID; library.mkdir(parents=True)
         Image.new('RGB', (595, 842), '#f7f7ef').save(library / 'page-001.png')
         Image.new('RGB', (595, 842), '#f7f7ef').save(library / 'page-001.jpg')
+        if quality:
+            import pdf_tools
+            doc['blocks'].append({'id': 'table-test', 'kind': 'caption', 'page': 2, 'text': 'Table 1. Sensor force.',
+                                  'is_table': True, 'image': 'page-001.jpg', 'bbox': [.1, .6, .9, .8],
+                                  'table_cells': [['Sensor', 'Force'], ['A', '2.0 N']]})
+            from ezread.tables import fingerprint
+            doc['table_translations'] = {'table-test': {'caption': '表 1。传感器力。',
+                'cells': [['传感器', '力'], ['A', '2.0 N']], 'source_hash': fingerprint(doc['blocks'][-1])}}
+            server.put_doc(doc)
+            def reader_json(instruction, payload, schema, config, cancel_event=None, image_paths=None):
+                if 'entries' in schema['properties']:
+                    return {'entries': [{'source': 'First', 'target': '第一', 'abbreviation': '', 'definition': '合成测试术语', 'block_id': 'one', 'uncertain': True}]}
+                if 'text' in schema['properties']:
+                    if not image_paths: return {'text': '模拟框外译文：' + payload.get('text', '')}
+                    assert Path(image_paths[0]).is_file()
+                    return {'text': '模拟图表译文：图中标签'}
+                if 'cells' in schema['properties']:
+                    return {'caption': '表 1。传感器力。', 'cells': [['传感器', '力'], ['A', '2.0 N']]}
+                return {bid: '第一😀句。术语核对后的句子。' for bid in schema['properties']}
+            paper_ai.reader_json = reader_json
+            def manual_crop(folder, page, bbox):
+                Image.new('RGB', (500, 80), 'white').save(folder / 'manual.jpg')
+                return 'manual.jpg'
+            pdf_tools.cover_crop = manual_crop
         class Handler(server.Handler):
             def log_message(self, *args): pass
             def do_GET(self):
@@ -99,6 +124,34 @@ def main():
                 super().do_GET()
             def do_POST(self):
                 global slow_model, progress_mode
+                if quality and self.path == '/__test/caption-fixture':
+                    sys.path.insert(0, str(ROOT / 'tests'))
+                    from test_region_splits import make_pdf
+                    make_pdf(library / 'original.pdf', [(60, 550, 'Figure 12. Missing caption.'),
+                        (60, 538, 'Caption continuation.'), (60, 500, 'Next paragraph.')])
+                    changed = server.get_doc(PID)
+                    changed.update(blocks=[], paragraph_repairs=[], region_text_splits=[], text_annotations=[],
+                        formula_regions=[{'id': 'caption-figure', 'page': 1, 'bbox': [.1,.1,.49,.30],
+                            'image': 'manual.jpg', 'source': '', 'region_kind': 'figure', 'block_ids': []}],
+                        region_translations={}, region_dismissals=[])
+                    server.put_doc(changed)
+                    self.send_json({'ok': True}); return
+                if quality and self.path == '/__test/split-fixture':
+                    sys.path.insert(0, str(ROOT / 'tests'))
+                    from test_region_splits import make_pdf
+                    from ezread.text_actions import digest
+                    make_pdf(library / 'original.pdf')
+                    source = 'Before retained. GRAPH LABEL SECOND LABEL After retained.'
+                    changed = server.get_doc(PID)
+                    changed.update(blocks=[{'id': 'split-source', 'page': 1, 'kind': 'paragraph', 'bbox': [.09,.18,.8,.72],
+                        'text': source, 'translation': '完整旧译文保留', 'note': '保留旧批注'}],
+                        pages=[{'number': 1, 'width': 600, 'height': 800, 'image': 'page-001.jpg'}], figures=[],
+                        formula_regions=[], region_text_splits=[], region_dismissals=[], region_translations={},
+                        text_annotations=[{'id': 'split-note', 'kind': 'note', 'note': '原文范围批注', 'ranges': [
+                            {'block_id': 'split-source', 'language': 'original', 'start': 0, 'end': 6,
+                             'quote': 'Before', 'prefix': '', 'suffix': '', 'text_hash': digest(source)}]}])
+                    server.put_doc(changed)
+                    self.send_json({'ok': True}); return
                 if self.path == '/__test/model-delay':
                     slow_model = bool(self.read_json().get('enabled'))
                     self.send_json({'ok': True}); return
@@ -131,7 +184,7 @@ def main():
                 if 'error' in value: raise RuntimeError(value['error'])
                 print(json.dumps(value,ensure_ascii=False))
             else:
-                result = subprocess.run([node, str(ROOT / 'tests/browser_reader_text.cjs')], env=environment, cwd=ROOT)
+                result = subprocess.run([node, str(ROOT / ('tests/browser_reader_quality.cjs' if quality else 'tests/browser_reader_text.cjs'))], env=environment, cwd=ROOT)
             if result.returncode: raise SystemExit(result.returncode)
         finally:
             listener.shutdown(); listener.server_close(); thread.join()

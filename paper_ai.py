@@ -226,9 +226,9 @@ class CodexSession:
                 raise SessionError(str(mapped),mapped.code)
             return response.get('result',{})
 
-    def turn(self,thread_id,prompt,config,schema,cancel_event=None,on_progress=None):
+    def turn(self,thread_id,prompt,config,schema,cancel_event=None,on_progress=None,image_paths=None):
         started=self.rpc('turn/start',{'threadId':thread_id,
-            'input':[{'type':'text','text':prompt,'text_elements':[]}],
+            'input':[{'type':'text','text':prompt,'text_elements':[]}] + [{'type': 'localImage', 'path': p} for p in (image_paths or [])],
             'model':config['model'],'effort':config['reasoning_effort'],
             'outputSchema':schema, **({'summary':'auto'} if on_progress else {})})
         turn_id=started.get('turn',{}).get('id')
@@ -479,14 +479,23 @@ def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None):
         return {'answer':answer.strip(),'citations':cited,'thread_id':thread_id}
 
 
+def reader_json(instruction, payload, schema, config, cancel_event=None, image_paths=None):
+    """Bounded structured reader preparation; never enables tools or web access."""
+    with CodexSession() as session:
+        tid = _start_or_resume(session, None, config, BASE + ' ' + instruction, '{}')
+        return session.turn(tid, json.dumps(payload, ensure_ascii=False), config, schema, cancel_event=cancel_event, **({'image_paths': image_paths} if image_paths else {}))
+
+
 def translate_batch(con_factory,pid,doc,batch,config,thread_id,
                     on_thread=None,cancel_event=None):
     from ezread.text_actions import original_text
+    from ezread.terminology import translation_entries
     ids=[b['id'] for b in batch]
     schema={'type':'object','additionalProperties':False,
             'properties':{bid:{'type':'string'} for bid in ids},'required':ids}
-    instruction=BASE+' 全文翻译任务：逐段完整英译中；不得摘要、漏译或合并段落；保留数值、单位、公式、引文和限定条件。只返回指定 JSON。'
+    instruction=BASE+' 全文翻译任务：逐段完整英译中；不得摘要、漏译或合并段落；保留数值、单位、公式、引文和限定条件。优先遵守本篇 terminology 术语表，在相同含义下统一译名，勿对多义词机械替换。正文短公式和变量保留源符号，不编造数学内容。只返回指定 JSON。'
     payload={'title':doc.get('title'),'abstract':doc.get('abstract','')[:3000],
+             'terminology': translation_entries(doc),
              'previous_terms':[{'source':original_text(b)[:300], 'translation':b['translation'][:300]}
                   for b in doc.get('blocks',[]) if b.get('translation')][:8],
              'blocks':[{'id':b['id'],'page':b.get('page'),'text':original_text(b)} for b in batch]}

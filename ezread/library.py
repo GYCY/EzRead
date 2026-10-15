@@ -60,7 +60,9 @@ def media_url(pid, filename):
 
 def translation_counts(app: ApplicationContext, doc):
     from .text_actions import original_text
-    target = [b for b in doc.get('blocks', []) if b.get('kind') != 'reference' and not b.get('is_formula') and original_text(b).strip()]
+    from .formulas import display_doc
+    doc = display_doc(doc)
+    target = [b for b in doc.get('blocks', []) if b.get('kind') != 'reference' and not b.get('is_formula') and not b.get('is_table') and not b.get('formula_continuation') and not b.get('region_retained') and not b.get('figure_caption_number') and b.get('source_region_kind') not in ('figure', 'algorithm') and original_text(b).strip()]
     t = dict(doc.get('translation', {}))
     staging = t.pop('staging', None)
     current_done = sum(bool(b.get('translation', '').strip()) for b in target)
@@ -85,6 +87,9 @@ def public_doc(app: ApplicationContext, doc, full=False):
               'metrics_note', 'conference_rankings', 'read_state', 'reading_structure', 'collection_assignment'}
     hidden.update({'text_annotations', 'text_revision_history', 'text_action_receipts'})
     hidden.update({'team', 'team_sources', 'team_status', 'team_error'})
+    hidden.update({'terminology', 'terminology_history', 'terminology_review', 'formula_regions', 'formula_review', 'formula_history'})
+    hidden.update({'table_translations', 'table_translation_history'})
+    hidden.update({'paragraph_repairs', 'region_translations', 'region_dismissals', 'region_restored_text', 'region_text_splits', 'figure_caption_history'})
     out = {k: v for k, v in doc.items() if k not in hidden}
     from .publication import assessment
     out['metadata_enrichment'] = assessment(doc)
@@ -123,6 +128,12 @@ def public_doc(app: ApplicationContext, doc, full=False):
         import copy
         from . import text_actions
         import paper_structure
+        from . import terminology, formulas
+        out['terminology'] = terminology.ledger(doc)
+        out['region_revision'] = formulas.revision(doc)
+        doc = formulas.display_doc(doc)
+        import layout_rules
+        out['layout_quality'] = layout_rules.audit(doc)
         if structure.get('version') != paper_structure.VERSION or structure.get('source_fingerprint') != paper_structure.fingerprint(doc):
             structure = paper_structure.organize(doc)
         out['reading_structure'] = structure

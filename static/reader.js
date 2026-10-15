@@ -236,6 +236,7 @@ function renderReader() {
         button("英文原文", () => readerSetTextLanguage("original"), "secondary", "", { "data-text-language": "original", "aria-pressed": String(readerRuntime.textLanguage === "original") }),
         button("译文", () => readerSetTextLanguage("auto"), "secondary", "", { "data-text-language": "auto", "aria-pressed": String(readerRuntime.textLanguage !== "original") })),
       button("修订历史", () => readerTextList("history"), "secondary"),
+      button("校对图表与公式", () => act(() => openReaderQuality("formulas")), "secondary"),
       button("待核对标记", () => readerTextList("annotations"), "secondary", "", { id: "reader-review-annotations", hidden: true }),
       el("span", { id: "reader-selection-mode-hint", class: "reader-selection-mode-hint" }, "选中文字即可显示操作选项")),
     el("div", { class: "reader-workspace" }, el("div", { class: "reader-layout", id: "reader-layout" }, original, divider, trans), el("aside", { class: "reader-notes", id: "reader-notes", hidden: true, "aria-label": "论文笔记" }), el("aside", { class: "reader-paper-chat", id: "reader-paper-chat", hidden: true, "aria-label": "本篇论文对话" })),
@@ -572,7 +573,7 @@ function readerBindScrolling() {
   }
 }
 
-function readerBlockSignature(b) { return JSON.stringify([b.text, b.text_override, b.translation, b.translation_needs_review, b.note, b.highlight, b.kind, b.is_formula, b.is_table, b.image_url, b.has_unparsed_math]); }
+function readerBlockSignature(b) { return JSON.stringify([b.text, b.text_override, b.translation, b.translation_needs_review, b.note, b.highlight, b.kind, b.is_formula, b.is_table, b.image_url, b.has_unparsed_math, b.table_translation, b.table_cells, b.source_region_kind, b.region_translation, b.region_retained]); }
 function renderReaderFigure(figure) {
   const box = figure.bbox, page = state.reader.pages.find(p => Number(p.number) === Number(figure.page));
   const ratio = box && page ? (box[2] - box[0]) * page.width / ((box[3] - box[1]) * page.height) : 0;
@@ -580,15 +581,26 @@ function renderReaderFigure(figure) {
     imageNode(figure.url, { alt: figure.caption || `原论文插图 · 第 ${figure.page} 页`,
       ...(Number.isFinite(ratio) && ratio > 0 ? { style: { aspectRatio: String(ratio) } } : {}) }));
 }
-function readerSourcePages(p) {
+function readerSourcePages(p, structure = null) {
+  const grouped = new Map(), consumed = new Set(), omitted = new Set((structure?.omitted || []).map(item => item.id));
+  const byId = new Map(p.blocks.map(b => [b.id, b]));
+  for (const section of structure?.sections || []) for (const entry of section.entries) {
+    const sources = entry.source_ids.map(id => byId.get(id)).filter(b => b && !b.formula_continuation && !omitted.has(b.id));
+    if (!sources.length) continue;
+    if (sources.some(b => b.region_retained || b.is_formula || b.is_table || ["figure", "algorithm"].includes(b.source_region_kind))) continue;
+    const ids = sources.map(b => b.id);
+    grouped.set(ids[0], { ...entry, source_ids: ids });
+    ids.slice(1).forEach(id => consumed.add(id));
+  }
   const numbers = [...new Set([...(p.pages || []).map(page => Number(page.number)), ...p.blocks.map(b => Number(b.page)), ...(p.figures || []).map(f => Number(f.page))])].filter(n => Number.isInteger(n) && n > 0).sort((a, b) => a - b);
   return numbers.map(number => {
     const blocks = p.blocks.filter(b => Number(b.page) === number);
     const narrow = blocks.filter(b => b.bbox && b.bbox[2] - b.bbox[0] < .55 && b.kind !== "heading");
     const left = narrow.filter(b => b.bbox[2] <= .56), right = narrow.filter(b => b.bbox[0] >= .44);
     const twoColumns = left.length >= 2 && right.length >= 2 && left.some(a => right.some(b => a.bbox[1] < b.bbox[3] && b.bbox[1] < a.bbox[3]));
-    const items = [...blocks.map(block => ({ block, bbox: block.bbox })), ...(p.figures || []).filter(f => Number(f.page) === number && f.url).map(figure => ({ figure, bbox: figure.bbox }))];
-    // Page membership is immutable. Geometry only decides placement within it.
+    const items = [...blocks.filter(block => !block.formula_continuation && !consumed.has(block.id) && !omitted.has(block.id)).map(block => ({ block, entry: grouped.get(block.id), bbox: block.bbox })), ...(p.figures || []).filter(f => Number(f.page) === number && f.url).map(figure => ({ figure, bbox: figure.bbox }))];
+    // A paragraph is placed at its first source page; its spans retain every
+    // original page anchor. Independent figures stay on their own source page.
     items.sort((a, b) => (a.bbox?.[1] ?? 1) - (b.bbox?.[1] ?? 1) || (a.bbox?.[0] ?? 0) - (b.bbox?.[0] ?? 0));
     const bands = []; let columns = null;
     for (const item of items) {
@@ -608,15 +620,15 @@ function renderSourcePages(p, structure) {
   for (const section of structure.sections) for (const entry of section.entries) for (const id of entry.source_ids) roles.set(id, entry.role);
   const renderItem = item => {
     if (item.figure) return renderReaderFigure(item.figure);
-    const b = item.block, entry = { id: b.id, source_ids: [b.id], role: roles.get(b.id) || (b.kind === "heading" ? "section_heading" : b.kind) };
-    readerRuntime.entriesBySource.set(b.id, entry);
+    const b = item.block, entry = item.entry || { id: b.id, source_ids: [b.id], role: roles.get(b.id) || (b.kind === "heading" ? "section_heading" : b.kind) };
+    for (const id of entry.source_ids) readerRuntime.entriesBySource.set(id, entry);
     return renderStructuredParagraph(entry);
   };
-  return readerSourcePages(p).map(page => el("section", { class: "translation-page reader-source-page", dataset: { page: page.number, columns: page.twoColumns ? 2 : 1 }, "aria-label": `译文 · 原 PDF 第 ${page.number} 页` },
+  return readerSourcePages(p, structure).map(page => el("section", { class: "translation-page reader-source-page", dataset: { page: page.number, columns: page.twoColumns ? 2 : 1 }, "aria-label": `译文 · 原 PDF 第 ${page.number} 页` },
     el("div", { class: "reader-source-page-body" }, page.bands.length ? page.bands.map(band => band.full ? renderItem(band.full) : el("div", { class: "reader-source-columns" },
       el("div", { class: "reader-source-column" }, band.left.map(renderItem)), el("div", { class: "reader-source-column" }, band.right.map(renderItem)))) :
       el("p", { class: "reader-error" }, "本页没有可提取的正文或插图，请对照原 PDF。")),
-    el("footer", { class: "reader-source-page-footer" }, `原 PDF 第 ${page.number} 页`, page.twoColumns ? " · 本页左栏读完，再读右栏" : "")));
+    el("footer", { class: "reader-source-page-footer" }, `原 PDF 第 ${page.number} 页`)));
 }
 function renderTranslations() {
   const p = state.reader, container = $("#translation-scroll"); if (!p || !container) return;
@@ -624,7 +636,7 @@ function renderTranslations() {
   const anchorSelector = ".translation-block";
   const anchor = readerCaptureAnchor(container, anchorSelector);
   const structure = p.reading_structure || { sections: [{ id: "body", role: "body", label: "Main text", entries: p.blocks.map(b => ({ id: b.id, role: b.kind === "heading" ? "section_heading" : b.kind, source_ids: [b.id] })) }] };
-  const signature = JSON.stringify([structure.sections, structure.status, structure.error, structure.warnings, p.figures, p.blocks.map(b => [b.id, b.page, b.bbox])]);
+  const signature = JSON.stringify([structure.sections, structure.status, structure.error, structure.warnings, p.figures, p.blocks.map(b => [b.id, b.page, b.bbox, b.is_formula, b.formula_continuation, b.image_url, b.is_table, b.source_region_kind, b.region_retained])]);
   const sameStructure = readerRuntime.structureSignature === signature;
   if (sameStructure) {
     for (const block of p.blocks) if (readerRuntime.blockSignatures.get(block.id) !== readerBlockSignature(block)) refreshBlock(block.id);
@@ -667,7 +679,7 @@ function renderStructuredParagraph(entry) {
   node.classList.toggle("is-caption", entry.role === "caption");
   if (["abstract", "article_info"].includes(entry.role) && /^(abstract|articleinfo)$/i.test(asText(sources[0].text).replace(/\s/g, ""))) node.classList.add("is-heading");
   const text = $(".translated-text", node);
-  if (text) {
+  if (text && !active.region_retained) {
     text.replaceChildren(...sources.flatMap((b, i) => [i ? document.createTextNode(" ") : null,
       readerTextSpan(b, { class: ["authors", "affiliations"].includes(entry.role) && /^[\d,;*†‡\s]+$/.test(asText(b.text)) ? "is-marker" : "" })]).filter(Boolean));
   }
@@ -678,13 +690,39 @@ function renderBlock(b) {
   readerRuntime.blockSignatures.set(b.id, readerBlockSignature(b));
   const isFormula = Boolean(b.is_formula), isReference = b.kind === "reference";
   const node = el("article", { class: `translation-block ${readerTextLanguage(b) === "original" && !isFormula ? "untranslated" : ""} ${b.kind === "heading" ? "is-heading" : ""} ${b.kind === "caption" ? "is-caption" : ""}`, dataset: { blockId: b.id, page: b.page } });
-  if (isFormula && b.image_url) node.append(el("div", { class: "block-label" }, "公式 · 原文"), el("div", { class: "reader-source-image" }, imageNode(b.image_url, { alt: "原文公式", class: "reader-formula-image" })));
+  if (b.region_retained) {
+    const details = el("details", {class: "reader-retained-source"}, el("summary", {}, "校对前内容 · 原文、旧译文与批注"),
+      el("p", {class: "small muted"}, "旧译文按原段完整保留，未按位置拆分；框外正文单独显示和翻译。"),
+      el("p", {class: "translated-text"}, readerTextSpan(b, {}, "original")));
+    if (b.translation) details.append(el("p", {class: "translated-text"}, readerTextSpan(b, {}, "translation")));
+    if (b.note) details.append(el("p", {class: "small"}, b.note));
+    details.addEventListener("toggle", () => { if (typeof readerPaintAnnotations === "function") readerPaintAnnotations(); });
+    node.append(details);
+    return node;
+  }
+  if (["figure", "algorithm"].includes(b.source_region_kind)) {
+    node.append(el("div", { class: "block-label" }, b.source_region_kind === "algorithm" ? "算法 · 原文" : "插图 · 原文"), imageNode(b.image_url, { alt: "原文插图", class: "reader-table-image" }));
+    appendRegionTranslation(node, b);
+    return node;
+  }
+  if (b.is_table) {
+    node.append(el("div", { class: "block-label" }, "表格 · 原文"));
+    if (b.image_url) node.append(el("div", { class: "reader-source-image" }, imageNode(b.image_url, { alt: "完整原文表格", class: "reader-table-image" })));
+    else node.append(el("p", {}, "表格区域待核对，请查看原 PDF 或使用“校对图表与公式”。"));
+    const translated = b.table_translation;
+    if (translated) {
+      const table = el("table", { class: "reader-chinese-table" }, el("tbody", {}, translated.cells.map(row => el("tr", {}, row.map(cell => el("td", {}, cell))))));
+      node.append(el("details", { class: "reader-table-details" }, el("summary", {}, "查看表格翻译"), el("p", { class: "table-caption-translation" }, translated.caption), el("p", { class: "small muted" }, translated.cells.length ? "行列与数值已校验；含义请对照原表。" : "表格内容待核对，当前仅有表题译文。"), el("div", { class: "reader-table-scroll" }, table)));
+    } else if (!b.table_cells?.length) node.append(el("p", { class: "small muted" }, "表格行列待核对，保留完整原表；暂不生成可能错位的中文表。"));
+    if (!translated || b.region_translation) appendRegionTranslation(node, b);
+    return node;
+  }
+  if (isFormula && b.image_url) node.append(el("div", { class: "block-label" }, "公式 · 原文"), el("div", { class: "reader-source-image" }, imageNode(b.image_url, { alt: "原文公式", class: "reader-formula-image", loading: "eager" })));
   else {
     if (isReference || isFormula && !b.translation) node.append(el("div", { class: "block-label" }, isReference ? "参考文献 · 原文" : "公式 · 请对照原文"));
     node.append(el("p", { class: "translated-text" }, readerTextSpan(b)));
   }
   if (b.is_table && b.image_url && !isFormula) node.append(el("div", { class: "reader-source-image" }, imageNode(b.image_url, { alt: "原文表格", class: "reader-table-image" })));
-  if (b.has_unparsed_math && !isFormula) node.append(el("div", { class: "block-label", title: "本段含无法可靠提取的数学字符，请查看左侧原 PDF。" }, "含公式 · 请核对原文"));
   if (b.translation_needs_review) node.append(el("small", { class: "reader-source-review" }, "原文已修改，译文待核对"));
   return node;
 }
@@ -812,7 +850,7 @@ function updateReaderProgress() {
   const t = translationOf(state.reader), node = $("#reader-translate-button");
   const label = $("#reader-text-pane-label");
   if (label) label.replaceChildren(icon("translate"), readerRuntime.textLanguage === "original" || t.done === 0 ? "英文原文" : t.done < t.total ? "译文与原文" : "中文译文");
-  if (node) node.replaceChildren(icon(ACTIVE_STATUSES.has(t.status) ? "pause" : "translate"), ACTIVE_STATUSES.has(t.status) ? `暂停 · ${Math.round(ratio(state.reader))}%` : DONE_STATUSES.has(t.status) ? "已译完" : t.done ? "继续翻译" : "全文翻译");
+  if (node) node.replaceChildren(icon(ACTIVE_STATUSES.has(t.status) ? "pause" : "translate"), ACTIVE_STATUSES.has(t.status) ? t.phase === "terminology" ? "暂停 · 正在建立术语表" : `暂停 · ${Math.round(ratio(state.reader))}%` : DONE_STATUSES.has(t.status) ? "已译完" : t.done ? "继续翻译" : "全文翻译");
 }
 async function refreshReader() {
   if (!readerScrollActive() || readerIsEditing()) return;
@@ -828,4 +866,19 @@ function applyReaderPreferences() {
   drawOriginalPage(); readerRestoreAnchor($("#original-scroll"), ".reader-page-section", originalAnchor);
   readerRestoreAnchor($("#translation-scroll"), ".translation-block", translationAnchor);
   readerQueuePositionSave();
+}
+
+function appendRegionTranslation(node, b) {
+  if (b.region_translation) {
+    node.append(el("details", { class: "reader-table-details" }, el("summary", {}, "查看图表翻译"),
+      el("p", { class: "region-translation-text" }, b.region_translation)));
+  } else {
+    node.append(button("翻译新增图表", event => act(async () => {
+      const pid = state.reader.id;
+      const result = await api(`/api/papers/${pid}/formulas`, {method: "POST", body: {action: "translate-missing"}});
+      updatePaper(result.paper);
+      if (state.reader?.id === pid) await refreshReader();
+      if (result.errors?.length) toast(result.errors.join("；"), "warn");
+    }, event.currentTarget), "secondary"));
+  }
 }
