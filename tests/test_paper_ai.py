@@ -29,7 +29,9 @@ def resolve(model='',reasoning_effort=''):
 class FakeSession:
     next_id=0
     calls=[]
-    def __init__(self,*_):
+    def __init__(self,*_,web_search=False):
+        self.web_search=web_search
+        self.opened_web_urls=set()
         self.temp=type('Temp',(),{'name':str(ROOT/'work')})()
     def __enter__(self): return self
     def __exit__(self,*_): pass
@@ -74,6 +76,86 @@ class PaperAITests(unittest.TestCase):
         try:
             with con: yield con
         finally: con.close()
+
+    def test_chat_enables_search_on_start_and_resume_but_translation_does_not(self):
+        paper_ai.ask(self.db,PID,self.doc,'Explain')
+        paper_ai.ask(self.db,PID,self.doc,'Continue')
+        for method,params in FakeSession.calls:
+            if method in ('thread/start','thread/resume'):
+                self.assertEqual(params['config']['web_search'],'live')
+                self.assertEqual(params['baseInstructions'],paper_ai.CHAT_BASE)
+        FakeSession.calls=[]
+        paper_ai.translate_batch(self.db,PID,self.doc,self.doc['blocks'],resolve(),None)
+        self.assertEqual(FakeSession.calls[0][1]['config']['web_search'],'disabled')
+
+    def test_web_sources_must_be_opened_in_current_turn_and_survive_history(self):
+        def answer(session,*args,**kwargs):
+            session.opened_web_urls={'https://example.org/paper'}
+            return {'answer':'外部研究','citations':[],
+                    'sources':[{'title':'Research','url':'https://example.org/paper'}]}
+        with patch.object(FakeSession,'turn',answer):
+            result=paper_ai.ask(self.db,PID,self.doc,'Search')
+        self.assertEqual(result['citations'][0]['type'],'web')
+        with self.db() as con:
+            self.assertEqual(paper_ai.history(con,PID)['messages'][-1]['citations'],result['citations'])
+        with patch.object(FakeSession,'turn',return_value={'answer':'Unverified','citations':[],
+                'sources':[{'title':'Unopened','url':'https://example.org/missing'}]}):
+            with self.assertRaises(paper_ai.SessionError):
+                paper_ai.ask(self.db,PID,self.doc,'Search again')
+        with self.db() as con:
+            self.assertEqual(len(paper_ai.history(con,PID)['messages']),2)
+
+    def test_no_search_is_valid_and_no_forced_failure_message(self):
+        result=paper_ai.ask(self.db,PID,self.doc,'Explain a concept')
+        self.assertNotIn('未找到',result['answer'])
+
+    def test_search_events_track_only_current_turn_opened_pages(self):
+        session=RealCodexSession.__new__(RealCodexSession)
+        session.deadline=time.monotonic()+1
+        session.events=queue.Queue()
+        session.rpc=lambda *_: {'turn':{'id':'turn-a'}}
+        for turn_id,action in [('wrong',{'type':'openPage','url':'https://example.org/wrong'}),
+                               ('turn-a',{'type':'search','query':'topic'}),
+                               ('turn-a',{'type':'openPage','url':'https://example.org/paper'})]:
+            session.events.put({'method':'item/completed','params':{'threadId':'thread-a','turnId':turn_id,
+                'item':{'type':'webSearch','action':action}}})
+        session.events.put({'method':'turn/completed','params':{'threadId':'thread-a',
+            'turn':{'id':'turn-a','status':'completed','items':[{'type':'agentMessage',
+                'text':'{"answer":"Answer","citations":[],"sources":[]}'},
+                {'type':'webSearch','action':{'type':'openPage','url':'https://example.org/final'}}]}}})
+        events=[]
+        session.turn('thread-a','q',resolve(),paper_ai.CHAT_SCHEMA,on_progress=events.append)
+        self.assertEqual(session.opened_web_urls,{'https://example.org/paper','https://example.org/final'})
+        self.assertTrue(any(e.get('stage')=='searching' for e in events))
+
+    def test_busy_thread_forks_context_without_new_empty_thread(self):
+        calls=[]
+        class BusySession(FakeSession):
+            def rpc(self,method,params):
+                calls.append((method,params))
+                if method=='thread/resume':
+                    raise paper_ai.SessionError('busy','thread_busy')
+                if method=='thread/fork':
+                    return {'thread':{'id':'forked-thread'}}
+                raise AssertionError('unexpected method')
+        session=BusySession(web_search=True)
+        tid=paper_ai._start_or_resume(session,'original-thread',resolve(),paper_ai.CHAT_BASE,'{}')
+        self.assertEqual(tid,'forked-thread')
+        self.assertEqual([c[0] for c in calls],['thread/resume','thread/fork'])
+        self.assertEqual(calls[-1][1]['threadId'],'original-thread')
+        self.assertEqual(calls[-1][1]['config']['web_search'],'live')
+
+    def test_active_writer_rpc_error_has_specific_code(self):
+        session=RealCodexSession.__new__(RealCodexSession)
+        session.number=0
+        session.deadline=time.monotonic()+1
+        session.send=lambda _: None
+        session.responses=queue.Queue()
+        session.responses.put({'id':1,'error':{'message':'thread abc already has an active writer'}})
+        with self.assertRaises(paper_ai.SessionError) as caught:
+            session.rpc('thread/resume',{})
+        self.assertEqual(caught.exception.code,'thread_busy')
+        self.assertIn('占用',str(caught.exception))
 
     def test_ask_reuses_thread_and_preserves_history_across_model_switch(self):
         first=paper_ai.ask(self.db,PID,self.doc,'What was measured?')

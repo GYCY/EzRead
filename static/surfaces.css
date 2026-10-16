@@ -1645,3 +1645,5 @@ dialog {
 .quality-pdf-page { margin-block: 16px 24px; }
 .quality-page-label { color: var(--muted); font-size: .9em; margin-block: 12px; }
 .quality-page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+.paper-chat-citations a { overflow-wrap: anywhere; }

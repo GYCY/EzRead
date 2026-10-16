@@ -37,6 +37,7 @@ async function pendingTests() {
     loadPaperChat=async()=>{throw Error('history refresh failed')};`, context);
   const run = context.sendPaperChat();
   assert.equal(calls.length, 1);
+  assert.equal("web_search" in calls[0].data, false);
   const snapshot = () => vm.runInContext("paperChatRuntime.pending.get('paper-a')", context);
   assert.equal(snapshot().question, "实验结果？", "Question becomes visible before a network response");
   await context.sendPaperChat(); assert.equal(calls.length, 1, "Duplicate sends are suppressed");
@@ -49,6 +50,7 @@ async function pendingTests() {
   assert.equal(timers.size, 0);
   context.state.reader = { id: "paper-a" };
   const retry = context.sendPaperChat();
+  assert.equal("web_search" in calls[1].data, false);
   onEvent({ type: "completed", answer: "saved answer" }); resolve(); await retry;
   assert.equal(snapshot().completed, true); assert.equal(snapshot().failed, false, "Saved success survives a history refresh error");
   assert.equal(vm.runInContext("paperChatRuntime.drafts.has('paper-a')", context), false, "Do not invite a duplicate retry of an already saved answer");

@@ -61,7 +61,7 @@ function paperChatMessage(message) {
     message.kind === "summary" ? el("div", { class: "paper-chat-role" }, "研究速览") : null,
     el("div", { class: "paper-chat-text" }, message.role === "user" ? message.text : paperChatMarkdown(message.text)));
   if (message.citations?.length) node.append(el("div", { class: "paper-chat-citations" },
-    message.citations.map(cite => button(`第 ${cite.page} 页 · ${cite.block_id}`, () => {
+    message.citations.map((cite, index) => cite.type === "web" ? paperChatInline(`[网络${message.citations.slice(0, index + 1).filter(c => c.type === "web").length}：${String(cite.title).replace(/[\[\]\n]/g, " ")}](${cite.url})`) : button(`第 ${cite.page} 页 · ${cite.block_id}`, () => {
       if (state.reader?.id !== paperChatRuntime.paperId) return;
       setReaderPage(cite.page, true); selectBlock(cite.block_id, true);
     }, "secondary"))));
@@ -93,7 +93,7 @@ function renderPaperChat() {
   version.value = String(data.generation);
   const history = el("div", { class: "paper-chat-history", id: "paper-chat-history", "aria-label": "论文对话消息" }, data.messages.map(paperChatMessage));
   if (visiblePending) history.append(paperChatMessage({ role: "user", text: visiblePending.question }), paperChatPending(visiblePending));
-  if (!data.messages.length && !visiblePending) history.append(el("p", { class: "paper-chat-empty" }, "向论文提问，回答将附论文出处"));
+  if (!data.messages.length && !visiblePending) history.append(el("p", { class: "paper-chat-empty" }, "围绕论文自由讨论，也可以提问或延伸探索"));
   const input = el("textarea", { id: "paper-chat-input", rows: "3", maxlength: "4000", placeholder: "向论文提问",
     value: paperChatRuntime.drafts.get(id) || "", disabled: !current || busy, "aria-label": "向论文提问" });
   input.addEventListener("input", () => paperChatRuntime.drafts.set(id, input.value));
