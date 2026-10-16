@@ -585,7 +585,7 @@ function readerSourcePages(p, structure = null) {
   const grouped = new Map(), consumed = new Set(), omitted = new Set((structure?.omitted || []).map(item => item.id));
   const byId = new Map(p.blocks.map(b => [b.id, b]));
   for (const section of structure?.sections || []) for (const entry of section.entries) {
-    const sources = entry.source_ids.map(id => byId.get(id)).filter(b => b && !b.formula_continuation && !omitted.has(b.id));
+    const sources = entry.source_ids.map(id => byId.get(id)).filter(b => b && !b.formula_continuation && !b.region_retained && !omitted.has(b.id));
     if (!sources.length) continue;
     if (sources.some(b => b.region_retained || b.is_formula || b.is_table || ["figure", "algorithm"].includes(b.source_region_kind))) continue;
     const ids = sources.map(b => b.id);
@@ -594,7 +594,7 @@ function readerSourcePages(p, structure = null) {
   }
   const numbers = [...new Set([...(p.pages || []).map(page => Number(page.number)), ...p.blocks.map(b => Number(b.page)), ...(p.figures || []).map(f => Number(f.page))])].filter(n => Number.isInteger(n) && n > 0).sort((a, b) => a - b);
   return numbers.map(number => {
-    const blocks = p.blocks.filter(b => Number(b.page) === number);
+    const blocks = p.blocks.filter(b => Number(b.page) === number && !b.region_retained);
     const narrow = blocks.filter(b => b.bbox && b.bbox[2] - b.bbox[0] < .55 && b.kind !== "heading");
     const left = narrow.filter(b => b.bbox[2] <= .56), right = narrow.filter(b => b.bbox[0] >= .44);
     const twoColumns = left.length >= 2 && right.length >= 2 && left.some(a => right.some(b => a.bbox[1] < b.bbox[3] && b.bbox[1] < a.bbox[3]));
@@ -690,16 +690,6 @@ function renderBlock(b) {
   readerRuntime.blockSignatures.set(b.id, readerBlockSignature(b));
   const isFormula = Boolean(b.is_formula), isReference = b.kind === "reference";
   const node = el("article", { class: `translation-block ${readerTextLanguage(b) === "original" && !isFormula ? "untranslated" : ""} ${b.kind === "heading" ? "is-heading" : ""} ${b.kind === "caption" ? "is-caption" : ""}`, dataset: { blockId: b.id, page: b.page } });
-  if (b.region_retained) {
-    const details = el("details", {class: "reader-retained-source"}, el("summary", {}, "校对前内容 · 原文、旧译文与批注"),
-      el("p", {class: "small muted"}, "旧译文按原段完整保留，未按位置拆分；框外正文单独显示和翻译。"),
-      el("p", {class: "translated-text"}, readerTextSpan(b, {}, "original")));
-    if (b.translation) details.append(el("p", {class: "translated-text"}, readerTextSpan(b, {}, "translation")));
-    if (b.note) details.append(el("p", {class: "small"}, b.note));
-    details.addEventListener("toggle", () => { if (typeof readerPaintAnnotations === "function") readerPaintAnnotations(); });
-    node.append(details);
-    return node;
-  }
   if (["figure", "algorithm"].includes(b.source_region_kind)) {
     node.append(el("div", { class: "block-label" }, b.source_region_kind === "algorithm" ? "算法 · 原文" : "插图 · 原文"), imageNode(b.image_url, { alt: "原文插图", class: "reader-table-image" }));
     appendRegionTranslation(node, b);
