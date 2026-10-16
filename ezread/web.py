@@ -89,7 +89,7 @@ def handler_for(app: ApplicationContext):
                     except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):
                         connected=False
                 try:
-                    result=paper_ai.ask(app.db,pid,doc,question,on_progress=emit,cancel_event=app.SHUTDOWN)
+                    result=paper_ai.ask(app.db,pid,doc,question,on_progress=emit,cancel_event=app.SHUTDOWN,selected_text=data.get('selected_text',''))
                     emit({'type':'completed',**result})
                 except Exception as exc:
                     emit({'type':'error','error':str(exc),'code':getattr(exc,'code','session')})
@@ -336,7 +336,7 @@ def handler_for(app: ApplicationContext):
                         if action=='chat-stream':
                             self.stream_paper_chat(pid,doc,data)
                         else:
-                            result = paper_ai.ask(app.db,pid,doc,data.get('question',''))
+                            result = paper_ai.ask(app.db,pid,doc,data.get('question',''),selected_text=data.get('selected_text',''))
                             self.send_json(result)
                     else:
                         import paper_structure

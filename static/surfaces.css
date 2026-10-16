@@ -1647,3 +1647,9 @@ dialog {
 .quality-page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 
 .paper-chat-citations a { overflow-wrap: anywhere; }
+
+.paper-chat-attachment { display: inline-flex; align-items: center; gap: .5rem; width: fit-content; max-width: 100%; padding: .4rem .6rem; margin-bottom: .4rem; border: 1px solid var(--line); border-radius: .6rem; font-size: .8rem; color: var(--muted); }
+.paper-chat-attachment button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 .2rem; font-size: 1.1rem; }
+.paper-chat-compose:has(.paper-chat-attachment) { flex-wrap: wrap; }
+.paper-chat-compose > .paper-chat-attachment { flex: 0 0 auto; }
+@media (max-width: 900px) { .paper-chat-compose:has(.paper-chat-attachment) { flex-direction: column; align-items: stretch; } .paper-chat-compose:has(.paper-chat-attachment) textarea { width: 100%; flex: none; } }

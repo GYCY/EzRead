@@ -157,6 +157,18 @@ class PaperAITests(unittest.TestCase):
         self.assertEqual(caught.exception.code,'thread_busy')
         self.assertIn('占用',str(caught.exception))
 
+    def test_selection_attachment_is_prompt_context_and_saved_separately(self):
+        text='Selected full text with a newline\n第二行'
+        paper_ai.ask(self.db,PID,self.doc,'Explain this',selected_text=text)
+        prompt=[v['prompt'] for method,v in FakeSession.calls if method=='turn'][-1]
+        self.assertIn(json.dumps(text,ensure_ascii=False),prompt)
+        with self.db() as con:
+            message=paper_ai.history(con,PID)['messages'][0]
+            self.assertEqual(message['text'],'Explain this')
+            self.assertEqual(message['citations'],[{'type':'selection','text':text}])
+        with self.assertRaises(ValueError):
+            paper_ai.ask(self.db,PID,self.doc,'Explain',selected_text='x'*20001)
+
     def test_ask_reuses_thread_and_preserves_history_across_model_switch(self):
         first=paper_ai.ask(self.db,PID,self.doc,'What was measured?')
         second=paper_ai.ask(self.db,PID,self.doc,'At what rate?')

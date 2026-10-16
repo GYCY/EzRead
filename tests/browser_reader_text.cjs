@@ -60,6 +60,27 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
     assert.equal((await apiState()).calls.length,0);
     checks.push('native drag automatically opens the selection menu and Ctrl+C retains exact text');
 
+    await menu(await select('one','第一😀句'));
+    assert.equal(await page.getByRole('menuitem',{name:'重新翻译对应段落',exact:true}).count(),0);
+    assert.equal(await page.getByRole('menuitem',{name:'定位原 PDF',exact:true}).count(),0);
+    await command('提问');
+    await page.locator('#paper-chat-input').waitFor();
+    assert.equal(await page.locator('#paper-chat-input').inputValue(),'');
+    assert.equal(await page.locator('.paper-chat-compose .paper-chat-attachment').innerText(),'▤\n已引用选中文字\n×');
+    assert.equal(await page.locator('.paper-chat-compose').innerText().then(t=>t.includes('第一😀句')),false);
+    await page.locator('#paper-chat-input').fill('我已有的问题');
+    await page.evaluate(()=>closePaperChat());
+    await menu(await select('one','第二句话'));
+    await command('提问');
+    await page.waitForFunction(()=>document.querySelector('#paper-chat-input')?.value==='我已有的问题');
+    assert.equal((await apiState()).calls.length,0);
+    await page.getByRole('button',{name:'移除引用文本'}).click();
+    assert.equal(await page.locator('.paper-chat-compose .paper-chat-attachment').count(),0);
+    assert.equal(await page.locator('#paper-chat-input').inputValue(),'我已有的问题');
+    await page.locator('#paper-chat-input').fill('');
+    await page.evaluate(()=>closePaperChat());
+    checks.push('selection question opens chat, preserves draft, attaches hidden selection without sending, and removes retired menu actions');
+
     await select('one','第一');await page.getByRole('menu',{name:'所选文字操作'}).waitFor();
     await page.keyboard.press('Escape');await page.waitForTimeout(180);
     assert.equal(await page.getByRole('menu',{name:'所选文字操作'}).count(),0,'Escape must not reopen the same menu.');

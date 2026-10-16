@@ -35,7 +35,9 @@ async function pendingTests() {
   vm.runInContext(`paperChatRuntime.paperId='paper-a'; paperChatRuntime.data={generation:1,current:{generation:1}};
     renderPaperChat=()=>{}; updatePaperChatProgress=()=>{};
     loadPaperChat=async()=>{throw Error('history refresh failed')};`, context);
+  vm.runInContext("paperChatRuntime.attachments.set('paper-a', '引用正文')", context);
   const run = context.sendPaperChat();
+  assert.equal(calls[0].data.selected_text, "引用正文");
   assert.equal(calls.length, 1);
   assert.equal("web_search" in calls[0].data, false);
   const snapshot = () => vm.runInContext("paperChatRuntime.pending.get('paper-a')", context);
@@ -45,6 +47,7 @@ async function pendingTests() {
   onEvent({ type: "answer", text: "partial" });
   context.state.reader = { id: "paper-b" };
   reject(Error("network disconnected")); await run;
+  assert.equal(vm.runInContext("paperChatRuntime.attachments.get('paper-a')", context), "引用正文");
   assert.equal(snapshot().failed, true); assert.equal(snapshot().answer, "");
   assert.equal(vm.runInContext("paperChatRuntime.drafts.get('paper-a')", context), "实验结果？");
   assert.equal(timers.size, 0);
@@ -58,5 +61,22 @@ async function pendingTests() {
   assert.equal(toasts.length, 2);
 }
 
-(async () => { await streamTests(); await pendingTests(); console.log("Paper chat: streaming UTF-8, terminal status, duplicate sends, failure recovery and saved-answer refresh passed."); })()
+async function selectionTests() {
+  let opened = 0;
+  const context = vm.createContext({ state: { reader: { id: "a" } }, $: () => null,
+    readerCloseTextPopup() {}, window: { getSelection: () => ({ removeAllRanges() {} }) } });
+  vm.runInContext(source("paper-chat.js"), context);
+  context.openPaperChat = async () => { opened++; };
+  await context.paperChatAskSelection({ paperId: "a", text: "First 😀\nsecond" });
+  assert.equal(vm.runInContext("paperChatRuntime.attachments.get('a')", context), "First 😀\nsecond");
+  await context.paperChatAskSelection({ paperId: "a", text: "More" });
+  assert.equal(vm.runInContext("paperChatRuntime.attachments.get('a')", context), "More");
+  await context.paperChatAskSelection({ paperId: "b", text: "Wrong paper" });
+  assert.equal(opened, 2);
+  await assert.rejects(context.paperChatAskSelection({ paperId: "a", text: "x".repeat(20001) }), /20000/);
+  assert.equal(opened, 2);
+  assert.equal(vm.runInContext("paperChatRuntime.attachments.get('a')", context), "More");
+}
+
+(async () => { await streamTests(); await pendingTests(); await selectionTests(); console.log("Paper chat: streaming UTF-8, terminal status, duplicate sends, failure recovery and saved-answer refresh passed."); })()
   .catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,6 +1,6 @@
 "use strict";
 
-const paperChatRuntime = { paperId: null, data: null, pending: new Map(), drafts: new Map(), request: 0,
+const paperChatRuntime = { paperId: null, data: null, pending: new Map(), drafts: new Map(), attachments: new Map(), request: 0,
   width: null, widthLoaded: false, resizeObserver: null };
 
 function paperChatApplyWidth(width = null, persist = false) {
@@ -55,13 +55,21 @@ function paperChatReasoning(text, active = false) {
     el("summary", {}, active ? "思考过程" : "查看思考过程"), paperChatMarkdown(text));
 }
 
+function paperChatAttachment(remove = null) {
+  return el("div", { class: "paper-chat-attachment" },
+    el("span", { "aria-hidden": "true" }, "▤"), el("span", {}, "已引用选中文字"),
+    remove ? el("button", { type: "button", "aria-label": "移除引用文本", onclick: remove }, "×") : null);
+}
+
 function paperChatMessage(message) {
   if (message.kind === "reasoning") return paperChatReasoning(message.text);
   const node = el("div", { class: `paper-chat-message role-${message.role}` },
     message.kind === "summary" ? el("div", { class: "paper-chat-role" }, "研究速览") : null,
     el("div", { class: "paper-chat-text" }, message.role === "user" ? message.text : paperChatMarkdown(message.text)));
-  if (message.citations?.length) node.append(el("div", { class: "paper-chat-citations" },
-    message.citations.map((cite, index) => cite.type === "web" ? paperChatInline(`[网络${message.citations.slice(0, index + 1).filter(c => c.type === "web").length}：${String(cite.title).replace(/[\[\]\n]/g, " ")}](${cite.url})`) : button(`第 ${cite.page} 页 · ${cite.block_id}`, () => {
+  const references = (message.citations || []).filter(c => c.type !== "selection");
+  if (message.citations?.some(c => c.type === "selection")) node.append(paperChatAttachment());
+  if (references.length) node.append(el("div", { class: "paper-chat-citations" },
+    references.map((cite, index) => cite.type === "web" ? paperChatInline(`[网络${references.slice(0, index + 1).filter(c => c.type === "web").length}：${String(cite.title).replace(/[\[\]\n]/g, " ")}](${cite.url})`) : button(`第 ${cite.page} 页 · ${cite.block_id}`, () => {
       if (state.reader?.id !== paperChatRuntime.paperId) return;
       setReaderPage(cite.page, true); selectBlock(cite.block_id, true);
     }, "secondary"))));
@@ -92,7 +100,7 @@ function renderPaperChat() {
     data.generations.map(item => el("option", { value: item.generation }, `第 ${item.generation} 版 · ${item.model || "模型未记录"}`)));
   version.value = String(data.generation);
   const history = el("div", { class: "paper-chat-history", id: "paper-chat-history", "aria-label": "论文对话消息" }, data.messages.map(paperChatMessage));
-  if (visiblePending) history.append(paperChatMessage({ role: "user", text: visiblePending.question }), paperChatPending(visiblePending));
+  if (visiblePending) history.append(paperChatMessage({ role: "user", text: visiblePending.question, citations: visiblePending.selectedText ? [{ type: "selection" }] : [] }), paperChatPending(visiblePending));
   if (!data.messages.length && !visiblePending) history.append(el("p", { class: "paper-chat-empty" }, "围绕论文自由讨论，也可以提问或延伸探索"));
   const input = el("textarea", { id: "paper-chat-input", rows: "3", maxlength: "4000", placeholder: "向论文提问",
     value: paperChatRuntime.drafts.get(id) || "", disabled: !current || busy, "aria-label": "向论文提问" });
@@ -103,7 +111,10 @@ function renderPaperChat() {
   const threadLink = data.thread_id ? button("在 Codex 中打开 ↗", () => void openPaperChatInCodex(), "secondary", "", { class: "paper-chat-native", id: "paper-chat-open-codex" }) : null;
   pane.replaceChildren(paperChatResizeHandle(), el("div", { class: "paper-chat-heading" }, el("strong", {}, "论文对话"), threadLink,
     iconButton("close", "收起论文对话", () => closePaperChat())), version, history,
-    current ? el("div", { class: "paper-chat-compose" }, input,
+    current ? el("div", { class: "paper-chat-compose" },
+      paperChatRuntime.attachments.has(id) ? paperChatAttachment(() => {
+        paperChatRuntime.attachments.delete(id); renderPaperChat(); $("#paper-chat-input")?.focus();
+      }) : null, input,
       el("div", { class: "paper-chat-compose-footer" }, el("small", {}, "Enter 发送 · Shift+Enter 换行"),
         el("button", { type: "button", class: "button primary paper-chat-send", id: "paper-chat-send",
           disabled: busy, "aria-label": busy ? "正在回答" : "发送", onclick: () => void sendPaperChat() },
@@ -160,6 +171,24 @@ async function openPaperChat() {
   await loadPaperChat(); $("#paper-chat-input")?.focus({ preventScroll: true });
 }
 
+async function paperChatAskSelection(selection) {
+  const id = selection?.paperId, text = selection?.text;
+  if (!id || state.reader?.id !== id || typeof text !== "string" || !text.trim()) return;
+  const pending = paperChatRuntime.pending.get(id);
+  if (pending && !pending.failed && !pending.completed) throw Error("请等待当前回答完成后再添加引用。");
+  if (text.length > 20000) throw Error("引用文本超过 20000 字，请缩短选区后重试。");
+  paperChatRuntime.attachments.set(id, text);
+  readerCloseTextPopup(true);
+  window.getSelection()?.removeAllRanges();
+  await openPaperChat();
+  if (state.reader?.id !== id || paperChatRuntime.paperId !== id) return;
+  const input = $("#paper-chat-input");
+  if (input && !input.disabled) {
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+}
+
 function closePaperChat() {
   const pane = $("#reader-paper-chat");
   if (pane) pane.hidden = true;
@@ -186,12 +215,13 @@ async function sendPaperChat() {
   const input = $("#paper-chat-input"), id = state.reader?.id, data = paperChatRuntime.data;
   const question = input?.value.trim(), existing = paperChatRuntime.pending.get(id);
   if (!id || !question || !data || data.generation !== data.current.generation || (existing && !existing.failed && !existing.completed)) return;
-  const pending = { question, generation: data.generation, label: "正在发送问题", started: Date.now(), reasoning: "", answer: "", completed: false, failed: false };
-  paperChatRuntime.pending.set(id, pending); paperChatRuntime.drafts.delete(id);
+  const selectedText = paperChatRuntime.attachments.get(id) || "";
+  const pending = { question, selectedText, generation: data.generation, label: "正在发送问题", started: Date.now(), reasoning: "", answer: "", completed: false, failed: false };
+  paperChatRuntime.pending.set(id, pending); paperChatRuntime.drafts.delete(id); paperChatRuntime.attachments.delete(id);
   renderPaperChat();
   const timer = setInterval(() => updatePaperChatProgress(id), 1000);
   try {
-    await apiStream(`/api/papers/${encodeURIComponent(id)}/ai/chat-stream`, { question }, event => {
+    await apiStream(`/api/papers/${encodeURIComponent(id)}/ai/chat-stream`, { question, selected_text: selectedText }, event => {
       if (event.type === "status") pending.label = event.label;
       else if (event.type === "reasoning") { pending.reasoning = event.text; pending.label = "正在思考"; }
       else if (event.type === "answer") { pending.answer = event.text; pending.label = "正在生成回答"; }
@@ -205,6 +235,7 @@ async function sendPaperChat() {
     if (!pending.completed) {
       pending.failed = true; pending.label = `回答未完成：${error.message}`;
       pending.answer = ""; paperChatRuntime.drafts.set(id, question);
+      if (selectedText) paperChatRuntime.attachments.set(id, selectedText);
     }
     toast(`论文对话：${error.message}`, "error", 8000);
   } finally {

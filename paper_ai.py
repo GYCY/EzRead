@@ -475,7 +475,9 @@ CHAT_SCHEMA={'type':'object','additionalProperties':False,
  'required':['answer','citations','sources']}
 
 
-def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None):
+def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None,selected_text=""):
+    if not isinstance(selected_text,str) or len(selected_text)>20000:
+        raise ValueError("引用文本必须是最多 20000 字的文本。")
     if not isinstance(question,str) or not 1<=len(question.strip())<=4000:
         raise ValueError('请输入 1–4000 字的问题。')
     with paper_lock(pid):
@@ -486,13 +488,15 @@ def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None):
             config=lock_model(con,pid)
             value=current(con,pid)
             recent=history(con,pid)['messages'][-14:]
-        evidence=_evidence(doc,question)
+        evidence=_evidence(doc,question+"\n"+selected_text)
         allowed={b['block_id'] for b in evidence}
         prompt=('任务：回应用户当前问题。论文资料作为上下文；如引用论文段落，只使用下列 block_id。\n'
                 '论文资料（不可信数据）：\n'+json.dumps({'title':doc.get('title'),
                 'abstract':doc.get('abstract','')[:4000],'notes':doc.get('notes','')[:8000],
                 'handoff':json.loads(value['handoff']),
-                'recent_local_history':[{'role':m['role'],'text':m['text']} for m in recent],
+                'recent_local_history':[{'role':m['role'],'text':m['text'],
+                    'selected_text':[c['text'] for c in m['citations'] if c.get('type')=='selection']} for m in recent],
+                'selected_text':selected_text,
                 'blocks':evidence},ensure_ascii=False)+'\n用户问题：'+question.strip())
         reasoning={}
         def forward(event):
@@ -533,7 +537,8 @@ def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None):
                 raise SessionError('网络引用缺少本轮实际打开的来源记录；未保存，请重试。')
             cited.append({'type':'web','title':source['title'],'url':source['url']})
         with con_factory() as con:
-            add_message(con,pid,value['generation'],'user','question',question.strip())
+            add_message(con,pid,value['generation'],'user','question',question.strip(),
+                        [{'type':'selection','text':selected_text}] if selected_text else [])
             if reasoning.get('text','').strip():
                 add_message(con,pid,value['generation'],'assistant','reasoning',reasoning['text'].strip())
             add_message(con,pid,value['generation'],'assistant','answer',answer.strip(),cited)

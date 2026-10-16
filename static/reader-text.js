@@ -131,15 +131,7 @@ function readerShowSelectionMenu(selection, x, y) {
     item(mixed ? "修订文字（请选同一种语言）" : selection.ranges[0].language === "original" ? "修订原文" : "修订译文", () => readerOpenTextEditor("revise", selection), mixed),
     item("翻译单词", () => readerTranslateRange(selection, "word")),
     item("翻译句子", () => readerTranslateRange(selection, "sentence")),
-    item("重新翻译对应段落", async () => {
-      await readerApplyTextAction("retranslate", readerTextPayload(selection));
-      readerCloseTextPopup(); window.getSelection().removeAllRanges(); renderTranslations();
-      toast("对应段落已重新翻译");
-    }),
-    item("定位原 PDF", () => {
-      readerCloseTextPopup(); const block = state.reader.blocks.find(b => b.id === selection.ranges[0].block_id);
-      if (block) { const page = readerOriginalPage(block.page); readerLoadImage(page && $("img", page)); readerScrollToNode($("#original-scroll"), page, "center"); }
-    }));
+    item("提问", () => paperChatAskSelection(selection)));
   readerTextPopover(menu, x, y);
 }
 function readerQueueSelectionMenu() {
