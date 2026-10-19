@@ -5,6 +5,14 @@
   try {
     for (let i=0;state.loading&&i<100;i++) await new Promise(resolve=>setTimeout(resolve,20));
     await openReader(pid);
+    await openPaperChat();
+    paperChatRuntime.data.messages=[{role:'assistant',text:'原生滚动验证\n\n'.repeat(200)}];renderPaperChat();
+    await new Promise(resolve=>requestAnimationFrame(resolve));
+    const chat=document.querySelector('#reader-paper-chat'),history=document.querySelector('#paper-chat-history');
+    history.scrollTop=history.scrollHeight;
+    assert(getComputedStyle(chat).overflowY==='hidden'&&chat.scrollTop===0,'Chat outer pane must not scroll');
+    assert(history.clientHeight>20&&history.scrollHeight>history.clientHeight,'Chat history must scroll independently');
+    closePaperChat();
     const span=document.querySelector('[data-source-id="one"]'), node=span.firstChild;
     const range=document.createRange();range.setStart(node,0);range.setEnd(node,5);
     window.getSelection().removeAllRanges();window.getSelection().addRange(range);

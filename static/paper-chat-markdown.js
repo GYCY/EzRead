@@ -1,6 +1,6 @@
 "use strict";
 
-// Model output becomes DOM text, never HTML.
+// Model Markdown becomes DOM text; only local KaTeX renders math with trust disabled.
 function paperChatInline(text, depth = 0) {
   const fragment = document.createDocumentFragment();
   if (depth > 5) { fragment.append(document.createTextNode(text)); return fragment; }
@@ -24,7 +24,20 @@ function paperChatInline(text, depth = 0) {
 
 function paperChatMarkdown(text) {
   const root = el("div", { class: "paper-chat-markdown" });
-  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  const math = [];
+  // Protect math before Markdown interprets underscores, asterisks or table pipes.
+  // Code spans/fences are matched first and remain literal.
+  const protectedText = String(text || "").replace(/\r\n?/g, "\n").replace(
+    /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|(`+)[^`\n]*?\1|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|(?<!\\)\$\$[\s\S]*?(?<!\\)\$\$|(?<![\\$])\$(?!\$)(?:[^$\n\\]|\\.)+?(?<!\\)\$/g,
+    raw => {
+      if (raw.startsWith("`") || raw.startsWith("~~~")) return raw;
+      const display = raw.startsWith("\\[") || raw.startsWith("$$");
+      const size = raw.startsWith("\\") || display ? 2 : 1;
+      const token = `EZREADMATH${math.length}TOKEN`;
+      math.push({ token, raw, display, tex: raw.slice(size, -size) });
+      return token;
+    });
+  const lines = protectedText.split("\n");
   const listPattern = /^(\s*)([-+*]|\d+[.)])\s+(.+)$/;
   const cells = line => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(s => s.trim());
   const startsBlock = (line, next) => /^\s*(?:```|~~~|#{1,6}\s|>\s?|[-*_]{3,}\s*$)/.test(line) || listPattern.test(line) ||
@@ -72,6 +85,28 @@ function paperChatMarkdown(text) {
     const paragraph = [line]; i++;
     while (i < lines.length && lines[i].trim() && !startsBlock(lines[i], lines[i + 1])) paragraph.push(lines[i++]);
     root.append(el("p", {}, paperChatInline(paragraph.join("\n"))));
+  }
+  if (math.length) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      if (node.parentElement?.closest("code,pre")) continue;
+      const parts = node.textContent.split(/(EZREADMATH\d+TOKEN)/g);
+      if (parts.length === 1) continue;
+      const fragment = document.createDocumentFragment();
+      for (const part of parts) {
+        const formula = math.find(item => item.token === part);
+        if (!formula) { fragment.append(document.createTextNode(part)); continue; }
+        const span = el("span", { class: formula.display ? "paper-chat-math display" : "paper-chat-math" });
+        try {
+          if (!globalThis.katex) throw Error("Math renderer unavailable");
+          katex.render(formula.tex, span, { displayMode: formula.display, throwOnError: true,
+            trust: false, strict: "ignore", maxExpand: 1000, maxSize: 20 });
+        } catch { span.textContent = formula.raw; }
+        fragment.append(span);
+      }
+      node.replaceWith(fragment);
+    }
   }
   return root;
 }

@@ -90,6 +90,10 @@ def status() -> dict[str, Any]:
 
 def _classify_error(output: str) -> TranslationError:
     text = output.lower()
+    if any(s in text for s in ('context_length_exceeded', 'maximum context length', 'context window',
+                               'too many images', 'image limit', 'request too large', 'payload too large')):
+        return TranslationError('本次论文与对话超过模型的输入容量，未截断原文或改用摘要；请使用更大上下文的模型或将长 PDF 拆分后导入。',
+                                retryable=False, code='context_limit')
     if any(s in text for s in ("usage limit", "rate limit", "quota", "limit reached",
                                "usage_limit", "429", "out of credits", "insufficient_quota")):
         return TranslationError("Codex 订阅用量暂时不足或请求受限。已保留进度，可在额度恢复后续译。",

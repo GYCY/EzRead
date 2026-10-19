@@ -197,7 +197,9 @@ def _column_gutter(page):
                               if x < page.width * .46 or x > page.width * .54)
     if flank < 3 or minimum > flank * .72:
         return None
-    threshold = minimum + int(minimum * .23)
+    # A few labels from a figure may cross an otherwise persistent gutter.
+    # Requiring the exact minimum isolates a one-pixel valley and loses both columns.
+    threshold = minimum + max(2, int(minimum * .23))
     runs = []
     for x, count in values:
         if count <= threshold:

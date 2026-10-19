@@ -1,0 +1,4 @@
+KaTeX 0.16.22 (MIT)
+https://github.com/KaTeX/KaTeX
+https://registry.npmjs.org/katex/-/katex-0.16.22.tgz
+sha512-XCHRdUw4lf3SKBaJe4EvgqIuWwkPSo9XoeO8GjQW94Bp7TWv9hNhzZjZ+OH9yf1UmLygb7DIT5GSFQiyt16zYg==

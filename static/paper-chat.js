@@ -69,9 +69,9 @@ function paperChatMessage(message) {
   const references = (message.citations || []).filter(c => c.type !== "selection");
   if (message.citations?.some(c => c.type === "selection")) node.append(paperChatAttachment());
   if (references.length) node.append(el("div", { class: "paper-chat-citations" },
-    references.map((cite, index) => cite.type === "web" ? paperChatInline(`[网络${references.slice(0, index + 1).filter(c => c.type === "web").length}：${String(cite.title).replace(/[\[\]\n]/g, " ")}](${cite.url})`) : button(`第 ${cite.page} 页 · ${cite.block_id}`, () => {
+    references.map((cite, index) => cite.type === "web" ? paperChatInline(`[网络${references.slice(0, index + 1).filter(c => c.type === "web").length}${cite.open_recorded === false ? "（待核验）" : ""}：${String(cite.title).replace(/[\[\]\n]/g, " ")}](${cite.url})`) : button(cite.type === "pdf" ? `原 PDF 第 ${cite.page} 页` : `第 ${cite.page} 页 · ${cite.block_id}`, () => {
       if (state.reader?.id !== paperChatRuntime.paperId) return;
-      setReaderPage(cite.page, true); selectBlock(cite.block_id, true);
+      setReaderPage(cite.page, true); if (cite.type !== "pdf") selectBlock(cite.block_id, true);
     }, "secondary"))));
   return node;
 }
@@ -108,9 +108,10 @@ function renderPaperChat() {
   input.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void sendPaperChat(); }
   });
-  const threadLink = data.thread_id ? button("在 Codex 中打开 ↗", () => void openPaperChatInCodex(), "secondary", "", { class: "paper-chat-native", id: "paper-chat-open-codex" }) : null;
-  pane.replaceChildren(paperChatResizeHandle(), el("div", { class: "paper-chat-heading" }, el("strong", {}, "论文对话"), threadLink,
-    iconButton("close", "收起论文对话", () => closePaperChat())), version, history,
+  const threadLink = data.thread_id ? button("在 Codex 中打开 ↗", () => void openPaperChatInCodex(), "secondary", "", { class: "paper-chat-native", id: "paper-chat-open-codex", title: "在 Codex 中打开", "aria-label": "在 Codex 中打开" }) : null;
+  pane.replaceChildren(paperChatResizeHandle(), el("div", { class: "paper-chat-heading" }, el("strong", {}, "论文对话"),
+    el("div", { class: "paper-chat-context" }, version), threadLink,
+    iconButton("close", "收起论文对话", () => closePaperChat())), history,
     current ? el("div", { class: "paper-chat-compose" },
       paperChatRuntime.attachments.has(id) ? paperChatAttachment(() => {
         paperChatRuntime.attachments.delete(id); renderPaperChat(); $("#paper-chat-input")?.focus();

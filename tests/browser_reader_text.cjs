@@ -43,6 +43,20 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
   async function save(value) { await page.getByRole('textbox',{name:/所选文字批注|修订选中的文字/}).fill(value);await page.locator('.reader-text-editor').getByRole('button',{name:'保存',exact:true}).click();await page.waitForFunction(()=>readerTextUI.editor===null); }
   try {
     await open();
+    await page.evaluate(async()=>{await openPaperChat();paperChatRuntime.data.messages=[{role:'assistant',text:'长回答\n\n'.repeat(200)}];renderPaperChat();});
+    for(const size of [{width:1440,height:1000},{width:1100,height:600},{width:800,height:700}]) {
+      await page.setViewportSize(size);
+      await page.evaluate(()=>renderPaperChat());
+      const geometry=await page.evaluate(()=>{
+        const pane=document.querySelector('#reader-paper-chat'),history=document.querySelector('#paper-chat-history'),input=document.querySelector('#paper-chat-input');
+        history.scrollTop=history.scrollHeight;
+        const p=pane.getBoundingClientRect(),i=input.getBoundingClientRect();
+        return {overflow:getComputedStyle(pane).overflowY,outer:pane.scrollTop,history:history.clientHeight,scrolls:history.scrollHeight>history.clientHeight,inputVisible:i.top>=p.top&&i.bottom<=p.bottom};
+      });
+      assert.equal(geometry.overflow,'hidden');assert.equal(geometry.outer,0);assert(geometry.history>20);assert(geometry.scrolls);assert(geometry.inputVisible);
+    }
+    await page.setViewportSize({width:1440,height:1000});await page.evaluate(()=>closePaperChat());
+    checks.push('reader chat outer scroll disabled, inner history scrolls and composer stays visible at wide, short and narrow sizes');
     const startup = await apiState(), initial = startup.doc;
     assert.equal(startup.preparations.length,1);
     assert.equal(startup.calls.length,0);

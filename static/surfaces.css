@@ -1647,9 +1647,19 @@ dialog {
 .quality-page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 
 .paper-chat-citations a { overflow-wrap: anywhere; }
+.paper-chat-heading { gap: .4rem; min-width: 0; }
+.paper-chat-heading strong { flex: none; margin-right: 0; white-space: nowrap; }
+.paper-chat-context { display: flex; align-items: center; gap: .4rem; flex: 1; min-width: 0; }
+.paper-chat-context > select, .paper-chat-context > .app-select { flex: 1 1 11rem; min-width: 0; width: auto; max-width: 15rem; margin: 0 !important; }
+.paper-chat-context select, .paper-chat-context .app-select-trigger { min-height: 1.8rem; height: 1.8rem; padding: .15rem .35rem; font-size: .75rem; }
+.paper-chat-heading .paper-chat-native { flex: none; padding: .2rem; min-width: 1.5rem; }
+.reader-dialog .original-scroll, .reader-dialog .translation-scroll { overscroll-behavior: contain; }
 
 .paper-chat-attachment { display: inline-flex; align-items: center; gap: .5rem; width: fit-content; max-width: 100%; padding: .4rem .6rem; margin-bottom: .4rem; border: 1px solid var(--line); border-radius: .6rem; font-size: .8rem; color: var(--muted); }
 .paper-chat-attachment button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 .2rem; font-size: 1.1rem; }
 .paper-chat-compose:has(.paper-chat-attachment) { flex-wrap: wrap; }
 .paper-chat-compose > .paper-chat-attachment { flex: 0 0 auto; }
 @media (max-width: 900px) { .paper-chat-compose:has(.paper-chat-attachment) { flex-direction: column; align-items: stretch; } .paper-chat-compose:has(.paper-chat-attachment) textarea { width: 100%; flex: none; } }
+
+.paper-chat-math.display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .25rem 0; }
+.paper-chat-math .katex { font-size: 1.08em; }

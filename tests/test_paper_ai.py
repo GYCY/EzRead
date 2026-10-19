@@ -42,9 +42,9 @@ class FakeSession:
             return {'thread':{'id':f'00000000-0000-0000-0000-{FakeSession.next_id:012d}'}}
         return {}
     def turn(self,thread_id,prompt,config,schema,**_):
-        self.calls.append(('turn',{'thread_id':thread_id,'prompt':prompt,'config':config}))
+        self.calls.append(('turn',{'thread_id':thread_id,'prompt':prompt,'config':config,'images':_.get('image_paths',[]),'images_exist':all(Path(p).is_file() for p in _.get('image_paths',[]))}))
         if 'answer' in schema['properties']:
-            return {'answer':'实验证据见所引段落。','citations':['p1-b1']}
+            return {'answer':'实验证据见所引段落。','citations':['pdf-page-1']}
         return {key:f'译文 {key}' for key in schema['required']}
 
 
@@ -54,6 +54,8 @@ class PaperAITests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory(prefix='paper-ai-',dir=work)
         self.root=Path(self.temp.name)
         self.library=self.root/'library';(self.library/PID).mkdir(parents=True)
+        from test_layout_rules import synthetic_pdf
+        synthetic_pdf(self.library/PID/'original.pdf',600,[(40,720,'Full original PDF material parameter E = 42 MPa')])
         self.path=self.root/'library.sqlite3'
         with self.db() as con:
             con.execute('CREATE TABLE papers(id TEXT PRIMARY KEY)')
@@ -67,6 +69,25 @@ class PaperAITests(unittest.TestCase):
         self.model_patch.start();self.session_patch.start()
         FakeSession.calls=[];FakeSession.next_id=0
 
+    def ask(self, question, **kwargs):
+        return paper_ai.ask(self.db,PID,self.doc,question,library=self.library,**kwargs)
+
+    def test_pdf_is_default_even_when_extracted_blocks_are_missing(self):
+        self.doc['blocks']=[]
+        result=self.ask('材料参数根据什么设置？')
+        call=[v for method,v in FakeSession.calls if method=='turn'][-1]
+        self.assertIn('E = 42 MPa',call['prompt'])
+        self.assertEqual(len(call['images']),1)
+        self.assertTrue(call['images_exist'])
+        self.assertFalse(Path(call['images'][0]).exists(), 'Temporary pages must be cleaned after turn')
+        self.assertEqual(result['citations'][0]['type'],'pdf')
+
+    def test_missing_pdf_never_falls_back_to_selected_blocks(self):
+        (self.library/PID/'original.pdf').unlink()
+        with self.assertRaisesRegex(ValueError,'原始 PDF'):
+            self.ask('What material?')
+        self.assertFalse(any(method=='turn' for method,_ in FakeSession.calls))
+
     def tearDown(self):
         self.session_patch.stop();self.model_patch.stop();self.temp.cleanup()
 
@@ -78,8 +99,8 @@ class PaperAITests(unittest.TestCase):
         finally: con.close()
 
     def test_chat_enables_search_on_start_and_resume_but_translation_does_not(self):
-        paper_ai.ask(self.db,PID,self.doc,'Explain')
-        paper_ai.ask(self.db,PID,self.doc,'Continue')
+        self.ask('Explain')
+        self.ask('Continue')
         for method,params in FakeSession.calls:
             if method in ('thread/start','thread/resume'):
                 self.assertEqual(params['config']['web_search'],'live')
@@ -94,19 +115,31 @@ class PaperAITests(unittest.TestCase):
             return {'answer':'外部研究','citations':[],
                     'sources':[{'title':'Research','url':'https://example.org/paper'}]}
         with patch.object(FakeSession,'turn',answer):
-            result=paper_ai.ask(self.db,PID,self.doc,'Search')
+            result=self.ask('Search')
         self.assertEqual(result['citations'][0]['type'],'web')
         with self.db() as con:
             self.assertEqual(paper_ai.history(con,PID)['messages'][-1]['citations'],result['citations'])
         with patch.object(FakeSession,'turn',return_value={'answer':'Unverified','citations':[],
                 'sources':[{'title':'Unopened','url':'https://example.org/missing'}]}):
-            with self.assertRaises(paper_ai.SessionError):
-                paper_ai.ask(self.db,PID,self.doc,'Search again')
+            result=self.ask('Search again')
+            self.assertIn('Unverified',result['answer'])
+            self.assertIn('待核验',result['answer'])
+            self.assertFalse(result['citations'][0]['open_recorded'])
         with self.db() as con:
-            self.assertEqual(len(paper_ai.history(con,PID)['messages']),2)
+            self.assertEqual(len(paper_ai.history(con,PID)['messages']),4)
+
+    def test_invalid_web_source_preserves_completed_answer_without_unsafe_link(self):
+        with patch.object(FakeSession,'turn',return_value={'answer':'Completed answer','citations':[],
+                'sources':[{'title':'bad','url':'javascript:alert(1)'},None]}):
+            result=self.ask('Question')
+        self.assertIn('Completed answer',result['answer'])
+        self.assertIn('待核验',result['answer'])
+        self.assertEqual(result['citations'],[])
+        with self.db() as con:
+            self.assertEqual(paper_ai.history(con,PID)['messages'][-1]['text'],result['answer'])
 
     def test_no_search_is_valid_and_no_forced_failure_message(self):
-        result=paper_ai.ask(self.db,PID,self.doc,'Explain a concept')
+        result=self.ask('Explain a concept')
         self.assertNotIn('未找到',result['answer'])
 
     def test_search_events_track_only_current_turn_opened_pages(self):
@@ -159,7 +192,7 @@ class PaperAITests(unittest.TestCase):
 
     def test_selection_attachment_is_prompt_context_and_saved_separately(self):
         text='Selected full text with a newline\n第二行'
-        paper_ai.ask(self.db,PID,self.doc,'Explain this',selected_text=text)
+        self.ask('Explain this',selected_text=text)
         prompt=[v['prompt'] for method,v in FakeSession.calls if method=='turn'][-1]
         self.assertIn(json.dumps(text,ensure_ascii=False),prompt)
         with self.db() as con:
@@ -167,11 +200,11 @@ class PaperAITests(unittest.TestCase):
             self.assertEqual(message['text'],'Explain this')
             self.assertEqual(message['citations'],[{'type':'selection','text':text}])
         with self.assertRaises(ValueError):
-            paper_ai.ask(self.db,PID,self.doc,'Explain',selected_text='x'*20001)
+            self.ask('Explain',selected_text='x'*20001)
 
     def test_ask_reuses_thread_and_preserves_history_across_model_switch(self):
-        first=paper_ai.ask(self.db,PID,self.doc,'What was measured?')
-        second=paper_ai.ask(self.db,PID,self.doc,'At what rate?')
+        first=self.ask('What was measured?')
+        second=self.ask('At what rate?')
         self.assertEqual(first['thread_id'],second['thread_id'])
         self.assertEqual(len([c for c in FakeSession.calls if c[0]=='thread/start']),1)
         with self.db() as con:
@@ -181,8 +214,8 @@ class PaperAITests(unittest.TestCase):
             self.assertEqual(result['generation'],2)
         handoff=json.loads((self.library/PID/'ai-handoff-2.json').read_text(encoding='utf-8'))
         self.assertEqual(handoff['user_notes'],'Measure force carefully.')
-        self.assertEqual(handoff['verified_in_paper'][0]['citations'][0]['block_id'],'p1-b1')
-        third=paper_ai.ask(self.db,PID,self.doc,'Does it report contact force?')
+        self.assertEqual(handoff['verified_in_paper'][0]['citations'][0]['block_id'],'pdf-page-1')
+        third=self.ask('Does it report contact force?')
         self.assertNotEqual(third['thread_id'],first['thread_id'])
         with self.db() as con:
             self.assertEqual(len(paper_ai.history(con,PID,1)['messages']),4)
@@ -209,7 +242,7 @@ class PaperAITests(unittest.TestCase):
         FakeSession.turn=bad
         try:
             with self.assertRaises(paper_ai.SessionError):
-                paper_ai.ask(self.db,PID,self.doc,'What was measured?')
+                self.ask('What was measured?')
         finally:
             FakeSession.turn=original
         with self.db() as con:
@@ -261,7 +294,7 @@ class PaperAITests(unittest.TestCase):
             return original(self,thread_id,prompt,config,schema)
         events=[]
         with patch.object(FakeSession,'turn',streamed):
-            paper_ai.ask(self.db,PID,self.doc,'What was measured?',on_progress=events.append)
+            self.ask('What was measured?',on_progress=events.append)
         with self.db() as con:
             saved=paper_ai.history(con,PID)['messages']
         self.assertEqual([m['kind'] for m in saved],['question','reasoning','answer'])

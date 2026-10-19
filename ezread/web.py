@@ -89,7 +89,7 @@ def handler_for(app: ApplicationContext):
                     except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):
                         connected=False
                 try:
-                    result=paper_ai.ask(app.db,pid,doc,question,on_progress=emit,cancel_event=app.SHUTDOWN,selected_text=data.get('selected_text',''))
+                    result=paper_ai.ask(app.db,pid,doc,question,on_progress=emit,cancel_event=app.SHUTDOWN,selected_text=data.get('selected_text',''),library=app.LIBRARY)
                     emit({'type':'completed',**result})
                 except Exception as exc:
                     emit({'type':'error','error':str(exc),'code':getattr(exc,'code','session')})
@@ -178,11 +178,14 @@ def handler_for(app: ApplicationContext):
                 elif re.fullmatch(r'/api/papers/[a-f0-9]{16}/ai', path):
                     import paper_ai
                     pid = path.split('/')[-2]
-                    app.get_doc(pid)
+                    doc = app.get_doc(pid)
                     raw_generation = urllib.parse.parse_qs(parts.query).get('generation', [None])[0]
                     generation = int(raw_generation) if raw_generation is not None and raw_generation.isdigit() else None
                     with app.LOCK, app.db() as con:
-                        self.send_json(paper_ai.history(con, pid, generation))
+                        saved = paper_ai.history(con, pid, generation)
+                    from ezread.chat_pdf import attachment
+                    saved['original_pdf'] = attachment(app.LIBRARY, pid, doc)
+                    self.send_json(saved)
                 elif re.fullmatch(r'/api/papers/[a-f0-9]{16}/selection-progress', path):
                     query = urllib.parse.parse_qs(parts.query)
                     data = {key: query.get(key, [None])[0] for key in ('client_id', 'request_id')}
@@ -336,7 +339,7 @@ def handler_for(app: ApplicationContext):
                         if action=='chat-stream':
                             self.stream_paper_chat(pid,doc,data)
                         else:
-                            result = paper_ai.ask(app.db,pid,doc,data.get('question',''),selected_text=data.get('selected_text',''))
+                            result = paper_ai.ask(app.db,pid,doc,data.get('question',''),selected_text=data.get('selected_text',''),library=app.LIBRARY)
                             self.send_json(result)
                     else:
                         import paper_structure

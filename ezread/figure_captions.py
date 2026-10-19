@@ -28,6 +28,7 @@ def scan(doc, path):
                 group = [lead]
                 end = lead['bbox'][3]
                 candidates = sorted((line for line in lines if line['bbox'][1] > lead['bbox'][1]
+                    and line.get('_column') == lead.get('_column')
                     and abs(line['bbox'][0] - lead['bbox'][0]) <= page.width * .015), key=lambda line: line['bbox'][1])
                 for line in candidates:
                     if (line['bbox'][1] - end > lead['size'] * .9 or line['size'] > lead['size'] * 1.08
