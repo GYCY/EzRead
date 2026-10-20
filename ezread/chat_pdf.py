@@ -76,8 +76,11 @@ def prepare_pdf(library, pid, output_dir, *, cancel_event=None, on_progress=None
 def cached_pdf(library, pid, *, cancel_event=None, on_progress=None):
     """Render once per PDF content; publishing the manifest commits a complete cache."""
     source = original_pdf(library,pid)
+    hasher = hashlib.sha256()
     with source.open('rb') as stream:
-        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
     cache = source.parent / '.chat-pdf-cache' / digest
     with _CACHE_LOCK:
         manifest = cache / 'pages.json'
