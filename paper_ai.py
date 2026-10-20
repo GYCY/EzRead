@@ -52,8 +52,17 @@ def ensure(con, pid, timestamp=None):
         (paper_id,generation,handoff,created_at) VALUES(?,1,'{}',?)''', (pid,timestamp))
 
 
-def current(con, pid):
+def current(con, pid, generation=None):
     ensure(con, pid)
+    if generation is not None:
+        if type(generation) is not int or generation < 1:
+            raise ValueError('对话编号无效。')
+        row = con.execute('''SELECT generation,model,reasoning_effort,main_thread_id,
+            translation_thread_id,handoff FROM paper_ai_generations
+            WHERE paper_id=? AND generation=?''', (pid,generation)).fetchone()
+        if row is None:
+            raise ValueError('对话不存在。')
+        return dict(zip(('generation','model','reasoning_effort','main_thread_id','translation_thread_id','handoff'), row))
     row = con.execute('''SELECT g.generation,g.model,g.reasoning_effort,g.main_thread_id,
         g.translation_thread_id,g.handoff FROM paper_ai a JOIN paper_ai_generations g
         ON a.paper_id=g.paper_id AND a.generation=g.generation WHERE a.paper_id=?''', (pid,)).fetchone()
@@ -70,9 +79,9 @@ def summary(con, pid):
             'reasoning_effort':row[2],'has_chat':bool(row[3])}
 
 
-def lock_model(con, pid, model='', reasoning_effort=''):
+def lock_model(con, pid, model='', reasoning_effort='', *, generation=None):
     import codex_models
-    value = current(con, pid)
+    value = current(con, pid, generation)
     if value['model']:
         if model and model != value['model']:
             raise ValueError('本篇论文已固定模型；请先在卡片上切换模型。')
@@ -134,7 +143,7 @@ def switch_model(con, pid, config, doc, library):
                     if m['role']=='user'][-3:] if not findings else [],
                'translation_status': doc.get('translation',{}).get('status','idle'),
                'previous_generation': previous['generation']}
-    generation = previous['generation']+1
+    generation = con.execute('SELECT MAX(generation) FROM paper_ai_generations WHERE paper_id=?',(pid,)).fetchone()[0]+1
     con.execute('''INSERT INTO paper_ai_generations
         (paper_id,generation,model,reasoning_effort,handoff,created_at)
         VALUES(?,?,?,?,?,?)''', (pid,generation,checked['model'],checked['reasoning_effort'],
@@ -145,6 +154,15 @@ def switch_model(con, pid, config, doc, library):
     path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(json.dumps(handoff,ensure_ascii=False,indent=2),encoding='utf-8')
     return summary(con,pid)
+
+
+def new_chat(con, pid):
+    previous = current(con,pid)
+    generation = con.execute('SELECT MAX(generation) FROM paper_ai_generations WHERE paper_id=?',(pid,)).fetchone()[0]+1
+    con.execute("INSERT INTO paper_ai_generations(paper_id,generation,model,reasoning_effort,created_at) VALUES(?,?,?,?,?)",
+                (pid,generation,previous['model'],previous['reasoning_effort'],time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())))
+    con.execute('UPDATE paper_ai SET generation=? WHERE paper_id=?',(generation,pid))
+    return history(con,pid)
 
 
 class SessionError(RuntimeError):
@@ -201,16 +219,19 @@ class CodexSession:
         self.process.stdin.flush()
 
     def _get(self,source):
-        remaining=self.deadline-time.monotonic()
-        if remaining <= 0:
-            raise SessionError('Codex 响应超时；已保存的内容未受影响。')
-        try:
-            item=source.get(timeout=remaining)
-        except queue.Empty as exc:
-            raise SessionError('Codex 响应超时；已保存的内容未受影响。') from exc
-        if item is None:
-            raise SessionError('Codex 会话意外结束；可稍后重试。')
-        return item
+        while True:
+            if getattr(self,'cancel_event',None) is not None and self.cancel_event.is_set():
+                raise SessionError('操作已停止。','cancelled')
+            remaining=self.deadline-time.monotonic()
+            if remaining <= 0:
+                raise SessionError('Codex 响应超时；已保存的内容未受影响。')
+            try:
+                item=source.get(timeout=min(.25,remaining))
+            except queue.Empty:
+                continue
+            if item is None:
+                raise SessionError('Codex 会话意外结束；可稍后重试。')
+            return item
 
     def rpc(self,method,params):
         self.number+=1
@@ -230,25 +251,36 @@ class CodexSession:
                 raise SessionError(str(mapped),mapped.code)
             return response.get('result',{})
 
-    def turn(self,thread_id,prompt,config,schema,cancel_event=None,on_progress=None,image_paths=None):
+    def turn(self,thread_id,prompt,config,schema,cancel_event=None,on_progress=None,image_paths=None,compact=False):
         self.opened_web_urls=set()
-        started=self.rpc('turn/start',{'threadId':thread_id,
+        started=self.rpc('thread/compact/start',{'threadId':thread_id}) if compact else self.rpc('turn/start',{'threadId':thread_id,
             'input':[{'type':'text','text':prompt,'text_elements':[]}] + [{'type': 'localImage', 'path': p} for p in (image_paths or [])],
             'model':config['model'],'effort':config['reasoning_effort'],
             'outputSchema':schema, **({'summary':'auto'} if on_progress else {})})
         turn_id=started.get('turn',{}).get('id')
         summaries={}
         messages={}
+        retries=0
+        interrupt_sent=False
+        compaction_seen=False
+        compaction_active=compact
+        self.context_compacted=False
         last_ping=time.monotonic()
         def emit(kind, **values):
             if on_progress:
                 on_progress({'type':kind, **values})
         emit('status', stage='waiting', label='等待 Codex 响应')
         while True:
-            if cancel_event is not None and cancel_event.is_set():
-                raise SessionError('任务已暂停，已完成内容已保留。','cancelled')
+            if cancel_event is not None and cancel_event.is_set() and not interrupt_sent and turn_id:
+                self.number+=1
+                self.send({'id':self.number,'method':'turn/interrupt','params':{'threadId':thread_id,'turnId':turn_id}})
+                interrupt_sent=True
+                self.deadline=min(self.deadline,time.monotonic()+10)
+                emit('status',stage='stopping',label='正在停止…')
             remaining=self.deadline-time.monotonic()
             if remaining <= 0:
+                if interrupt_sent:
+                    return {'answer':answer_preview(''.join(messages.values())),'citations':[],'sources':[],'stopped':True}
                 raise SessionError('Codex 响应超时；已完成内容已保留。')
             try:
                 event=self.events.get(timeout=min(.25,remaining))
@@ -263,17 +295,39 @@ class CodexSession:
             if payload.get('threadId')!=thread_id:
                 continue
             method=event.get('method')
+            if method=='thread/tokenUsage/updated':
+                usage=payload.get('tokenUsage',{})
+                emit('usage',usage=usage)
+                continue
+            if compact and method=='turn/started':
+                turn_id=payload.get('turn',{}).get('id')
+            if payload.get('item',{}).get('type')=='contextCompaction':
+                compaction_seen=True
+                if method=='item/started':
+                    compaction_active=True
+                    emit('status',stage='compacting',label='正在压缩上下文 · 剩余时间暂无法预计')
+                elif method=='item/completed':
+                    compaction_active=False
+                    emit('status',stage='waiting',label='上下文已压缩，等待继续回答')
+            if method=='thread/compacted':
+                self.context_compacted=True
             if method!='turn/completed' and turn_id and payload.get('turnId')!=turn_id:
                 continue
             if event.get('method')=='error':
                 if turn_id and payload.get('turnId')!=turn_id:
                     continue
                 if payload.get('willRetry'):
-                    emit('status', stage='reconnecting', label='Codex 正在重新连接')
+                    retries+=1
+                    mapped=codex_bridge._classify_error(payload.get('error',{}).get('message',''))
+                    if getattr(self,'web_search',False) and retries > 3:
+                        raise SessionError('上下文压缩连接多次失败，聊天记录已保留。' if compact or compaction_active else f'连接多次重试失败：{mapped}',mapped.code)
+                    label=('正在重试上下文压缩' if compact or compaction_active else 'Codex 连接正在重试')
+                    reason={'network':'连接中断','quota':'额度受限','auth':'登录状态异常','context_limit':'上下文超限'}.get(mapped.code,'服务暂未完成请求')
+                    emit('status', stage='compacting' if compact or compaction_active else 'reconnecting', label=f'{label}（第 {retries} 次）：{reason}')
                     continue
                 raw=payload.get('error',{}).get('message','')
                 mapped=codex_bridge._classify_error(raw)
-                raise SessionError(str(mapped),mapped.code)
+                raise SessionError('上下文压缩失败，聊天记录已保留。' if compact or compaction_active else str(mapped),mapped.code)
             item=payload.get('item',{})
             item_id=payload.get('itemId') or item.get('id','')
             if method in ('item/started','item/completed') and item.get('type')=='webSearch':
@@ -305,12 +359,18 @@ class CodexSession:
             turn=payload.get('turn',{})
             if turn_id and turn.get('id')!=turn_id:
                 continue
+            if turn.get('status')=='interrupted':
+                return {'answer':answer_preview(''.join(messages.values())),'citations':[],'sources':[],'stopped':True}
             if turn.get('status')!='completed':
                 raw=(turn.get('error') or {}).get('message','')
                 if raw:
                     mapped=codex_bridge._classify_error(raw)
-                    raise SessionError(str(mapped),mapped.code)
-                raise SessionError('Codex 未完成本次回答；请稍后重试。')
+                    raise SessionError('上下文压缩失败，聊天记录已保留。' if compact or compaction_active else str(mapped),mapped.code)
+                raise SessionError('上下文压缩失败，聊天记录已保留。' if compact else 'Codex 未完成本次回答；请稍后重试。')
+            if compact:
+                if not compaction_seen and not self.context_compacted:
+                    raise SessionError('未收到上下文压缩完成记录。')
+                return {'answer':'','citations':[],'sources':[],'compacted':True}
             for item in turn.get('items',[]):
                 self._record_web_source(item)
             completed=[item.get('text','') for item in turn.get('items',[])
@@ -363,6 +423,7 @@ def _start_or_resume(session, thread_id, config, instructions, handoff):
                 fork_id=result.get('thread',{}).get('id')
                 if not isinstance(fork_id,str) or not fork_id or fork_id==thread_id:
                     raise SessionError('无法为被占用的 Codex 对话建立续接会话，请结束另一处对话后重试。','thread_busy')
+                session.inherited_thread_id = thread_id
                 return fork_id
             if exc.code!='missing_thread':
                 raise
@@ -417,6 +478,22 @@ def answer_preview(raw):
     return ''.join(result)
 
 
+def prepare_chat_thread(con_factory, pid, generation=None):
+    """Create an empty persistent thread on explicit open, without a model turn."""
+    with paper_lock(pid):
+        with con_factory() as con:
+            config = lock_model(con,pid,generation=generation)
+            value = current(con,pid,generation)
+        if value['main_thread_id']:
+            return value['main_thread_id']
+        with CodexSession(web_search=True) as session:
+            thread_id = _start_or_resume(session,None,config,CHAT_BASE,value['handoff'])
+        with con_factory() as con:
+            con.execute('UPDATE paper_ai_generations SET main_thread_id=? WHERE paper_id=? AND generation=?',
+                        (thread_id,pid,value['generation']))
+        return thread_id
+
+
 def open_in_codex(thread_id):
     """Dispatch only a saved, valid thread through the OS protocol handler."""
     if not isinstance(thread_id,str) or not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}',thread_id):
@@ -430,7 +507,7 @@ def open_in_codex(thread_id):
     return {'ok':True}
 
 
-CHAT_BASE = ("你是用户的技术搭档，当前论文的原始 PDF 已按页提供图像和文字，图像顺序与页码索引一致。像正常对话一样直接回答用户，"
+CHAT_BASE = ("你是用户的技术搭档，当前论文的原始 PDF 在首次提问时按页提供图像和文字，后续提问复用会话中的原文，图像顺序与页码索引一致。像正常对话一样直接回答用户，"
              "本地原始 PDF 是当前论文的首要依据。不要为回答本篇论文的问题重新联网寻找同篇原文；只有用户要求查找其他版本或外部资料时才检索相应来源。"
              "可解释知识、讨论想法、进行推理及延伸分析，不局限于论文原文。"
              "按问题需要自主使用联网搜索和打开网页；涉及最新信息、外部文献核实或用户要求搜索时应联网，"
@@ -450,49 +527,56 @@ CHAT_SCHEMA={'type':'object','additionalProperties':False,
  'required':['answer','citations','sources']}
 
 
-def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None,selected_text="",library=None):
+def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None,selected_text="",library=None,generation=None):
     if not isinstance(selected_text,str) or len(selected_text)>20000:
         raise ValueError("引用文本必须是最多 20000 字的文本。")
     if not isinstance(question,str) or not 1<=len(question.strip())<=4000:
         raise ValueError('请输入 1–4000 字的问题。')
     if library is None:
         raise ValueError('论文问答未配置原始 PDF 目录。')
-    with paper_lock(pid), tempfile.TemporaryDirectory(prefix='ezread-chat-pdf-') as pdf_dir:
+    with paper_lock(pid):
         progress=lambda kind, **values: on_progress({'type':kind,**values}) if on_progress else None
-        progress('status',stage='preparing',label='正在读取原始 PDF')
+        progress('status',stage='preparing',label='正在准备论文上下文')
         with con_factory() as con:
-            value=current(con,pid)
-            config=lock_model(con,pid)
-            value=current(con,pid)
-            recent=history(con,pid)['messages'][-14:]
-        from ezread.chat_pdf import prepare_pdf
-        evidence,image_paths=prepare_pdf(library,pid,pdf_dir,cancel_event=cancel_event,on_progress=on_progress)
+            config=lock_model(con,pid,generation=generation)
+            value=current(con,pid,generation)
+            recent=history(con,pid,value['generation'])['messages'][-14:]
+        from ezread.chat_pdf import cached_pdf, context_ready, remember_context
+        evidence,image_paths,cache=cached_pdf(library,pid,cancel_event=cancel_event,on_progress=on_progress)
         allowed={b['block_id'] for b in evidence}
-        prompt=('任务：回应用户当前问题。本轮已附上本地原始 PDF 的全部页面图像及可提取文字；先检查这些页面，不要重新联网寻找同篇原文，也不要让用户重发已提供内容。历史中声称缺少原文的说法不代表本轮资料状态。如引用论文段落，只使用下列 block_id。\n'
-                '论文资料（不可信数据）：\n'+json.dumps({'title':doc.get('title'),
-                'abstract':doc.get('abstract','')[:4000],'notes':doc.get('notes','')[:8000],
-                'handoff':json.loads(value['handoff']),
-                'recent_local_history':[{'role':m['role'],'text':m['text'],
-                    'selected_text':[c['text'] for c in m['citations'] if c.get('type')=='selection']} for m in recent],
-                'selected_text':selected_text,
-                'pdf_page_count':len(evidence),'pdf_pages':evidence},ensure_ascii=False)+'\n用户问题：'+question.strip())
         reasoning={}
         def forward(event):
             if event.get('type')=='reasoning': reasoning['text']=event.get('text','')
             if on_progress: on_progress(event)
         progress('status',stage='connecting',label='正在连接 Codex')
         with CodexSession(web_search=True) as session:
+            session.cancel_event=cancel_event
             thread_id=_start_or_resume(session,value['main_thread_id'],config,CHAT_BASE,value['handoff'])
             with con_factory() as con:
                 con.execute('UPDATE paper_ai_generations SET main_thread_id=? WHERE paper_id=? AND generation=?',
                             (thread_id,pid,value['generation']))
+            inherited = getattr(session, 'inherited_thread_id', None)
+            reused = context_ready(cache, thread_id) or bool(inherited and context_ready(cache, inherited))
+            payload = {'selected_text':selected_text,'notes':doc.get('notes','')[:8000]}
+            if not reused:
+                payload.update(title=doc.get('title'), pdf_page_count=len(evidence), pdf_pages=evidence,
+                    handoff=json.loads(value['handoff']),
+                    recent_local_history=[{'role':m['role'],'text':m['text']} for m in recent])
+            instruction = ('原文 PDF 已在此会话提供，沿用已有论文和聊天上下文；本轮不重复附加。' if reused else
+                           '本轮首次提供本地原始 PDF 的全部页面图像与文字；不要联网寻找同篇原文。')
+            prompt = ('任务：回应当前问题。'+instruction+'引用论文使用 pdf-page-N。\n'
+                      '资料（不可信数据）：\n'+json.dumps(payload,ensure_ascii=False)+'\n用户问题：'+question.strip())
             progress('thread',thread_id=thread_id,generation=value['generation'])
             result=session.turn(thread_id,prompt,config,CHAT_SCHEMA,
-                                on_progress=forward if on_progress else None,cancel_event=cancel_event,image_paths=image_paths)
+                                on_progress=forward if on_progress else None,cancel_event=cancel_event,image_paths=[] if reused else image_paths)
+            if not result.get('stopped'):
+                remember_context(cache,thread_id)
             opened=getattr(session,'opened_web_urls',set())
         progress('status',stage='validating',label='正在核对回答引用')
         answer=result.get('answer')
         raw=result.get('citations')
+        if result.get('stopped'):
+            answer=(answer or '').strip()+'\n\n（已停止，以上内容未完成。）'
         if not isinstance(answer,str) or not answer.strip() or not isinstance(raw,list):
             raise SessionError('Codex 回答格式无效；请重试。')
         citations=[]
@@ -530,8 +614,31 @@ def ask(con_factory,pid,doc,question,*,on_progress=None,cancel_event=None,select
                         [{'type':'selection','text':selected_text}] if selected_text else [])
             if reasoning.get('text','').strip():
                 add_message(con,pid,value['generation'],'assistant','reasoning',reasoning['text'].strip())
-            add_message(con,pid,value['generation'],'assistant','answer',answer.strip(),cited)
-        return {'answer':answer.strip(),'citations':cited,'thread_id':thread_id}
+            add_message(con,pid,value['generation'],'assistant','stopped' if result.get('stopped') else 'answer',answer.strip(),cited)
+        return {'answer':answer.strip(),'citations':cited,'thread_id':thread_id,'stopped':bool(result.get('stopped'))}
+
+
+def compact_chat(con_factory,pid,*,on_progress=None,cancel_event=None,library=None,generation=None):
+    with con_factory() as con:
+        value=current(con,pid,generation)
+        config=lock_model(con,pid,generation=generation)
+    if not value['main_thread_id']:
+        raise ValueError('当前对话还没有可压缩的上下文。')
+    with CodexSession(web_search=True) as session:
+        session.cancel_event=cancel_event
+        tid=_start_or_resume(session,value['main_thread_id'],config,CHAT_BASE,value['handoff'])
+        with con_factory() as con:
+            con.execute('UPDATE paper_ai_generations SET main_thread_id=? WHERE paper_id=? AND generation=?',(tid,pid,value['generation']))
+        if on_progress:
+            on_progress({'type':'thread','thread_id':tid,'generation':value['generation']})
+            on_progress({'type':'status','stage':'compacting','label':'正在压缩上下文 · 剩余时间暂无法预计'})
+        result=session.turn(tid,'',config,CHAT_SCHEMA,on_progress=on_progress,cancel_event=cancel_event,compact=True)
+        if result.get('compacted') and tid != value['main_thread_id']:
+            from ezread.chat_pdf import cached_pdf, context_ready, remember_context
+            _,_,cache=cached_pdf(library,pid)
+            if context_ready(cache,value['main_thread_id']):
+                remember_context(cache,tid)
+        return {**result,'thread_id':tid}
 
 
 def reader_json(instruction, payload, schema, config, cancel_event=None, image_paths=None):

@@ -49,7 +49,7 @@ class PaperChatHTTPTests(unittest.TestCase):
         # Origin rejection happens before body parsing. Avoid an unread POST body
         # causing Windows to reset the TCP connection as the HTTP/1.0 handler exits.
         req=urllib.request.Request(f'http://127.0.0.1:{self.httpd.server_port}/api/papers/{PID}/ai/{action}',
-                                   data=b'' if origin else json.dumps(data).encode(),headers=headers,method='POST')
+                                   data=b'' if origin or data is None else json.dumps(data).encode(),headers=headers,method='POST')
         return urllib.request.urlopen(req,timeout=3)
 
     def test_first_event_arrives_before_answer_completes(self):
@@ -63,6 +63,7 @@ class PaperChatHTTPTests(unittest.TestCase):
             try:
                 with self.request('chat-stream',{'question':'实验结果？'}) as response:
                     self.assertIn('application/x-ndjson',response.headers['Content-Type'])
+                    self.assertEqual(json.loads(response.readline())['type'],'operation')
                     self.assertEqual(json.loads(response.readline())['type'],'status')
                     gate.set()
                     rest=[json.loads(line) for line in response]
@@ -72,6 +73,7 @@ class PaperChatHTTPTests(unittest.TestCase):
     def test_stream_errors_are_terminal_events_and_invalid_request_is_http_error(self):
         with patch.object(paper_ai,'ask',side_effect=paper_ai.SessionError('连接失败')):
             with self.request('chat-stream',{'question':'结果？'}) as response:
+                self.assertEqual(json.loads(response.readline())['type'],'operation')
                 self.assertEqual(json.loads(response.readline())['type'],'error')
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.request('chat-stream',{'question':''})
@@ -91,6 +93,76 @@ class PaperChatHTTPTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 self.request('chat-stream',{'question':'duplicate'})
             self.assertEqual(caught.exception.code,409)
+
+    def test_retired_chat_and_highlight_routes_do_not_call_models(self):
+        with patch.object(paper_ai,'ask') as ask:
+            for action in ('chat','highlight'):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    self.request(action,None)
+                self.assertEqual(caught.exception.code,404)
+            ask.assert_not_called()
+
+    def test_stop_is_scoped_and_new_chat_does_not_erase_history(self):
+        entered=threading.Event()
+        def ask(*_,cancel_event,on_progress,**kwargs):
+            entered.set()
+            if not cancel_event.local.wait(2):
+                raise RuntimeError('Cancellation not delivered')
+            return {'answer':'partial','stopped':True}
+        with patch.object(paper_ai,'ask',side_effect=ask):
+            with self.request('chat-stream',{'question':'q','request_id':'active'}) as response:
+                self.assertEqual(json.loads(response.readline())['type'],'operation')
+                self.assertTrue(entered.wait(1))
+                with self.request('stop',{'request_id':'old'}) as stopped:
+                    self.assertFalse(json.load(stopped)['stopping'])
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    self.request('new',{})
+                self.assertEqual(caught.exception.code,409)
+                with self.request('stop',{'request_id':'active'}) as stopped:
+                    self.assertTrue(json.load(stopped)['stopping'])
+                self.assertTrue(json.loads(response.readline())['stopped'])
+        with server.db() as con:
+            paper_ai.add_message(con,PID,1,'user','question','keep me')
+        with self.request('new',{}) as response:
+            new=json.load(response)
+        self.assertEqual(new['generation'],2)
+        self.assertEqual(new['messages'],[])
+        self.assertIsNone(new['thread_id'])
+        with server.db() as con:
+            self.assertEqual(paper_ai.history(con,PID,1)['messages'][0]['text'],'keep me')
+        with patch.object(paper_ai,'ask',return_value={'answer':'continued'}) as ask:
+            with self.request('chat-stream',{'question':'continue','generation':1}) as response:
+                self.assertEqual([json.loads(line) for line in response][-1]['answer'],'continued')
+            self.assertEqual(ask.call_args.kwargs['generation'],1)
+        for invalid in [999,0,True,'1']:
+            with self.assertRaises(urllib.error.HTTPError):
+                self.request('chat-stream',{'question':'invalid','generation':invalid})
+
+    def test_empty_chat_open_prepares_selected_thread(self):
+        with self.request('new',{}) as response:
+            self.assertEqual(json.load(response)['generation'],2)
+        with patch.object(paper_ai,'prepare_chat_thread',return_value=TID) as prepare, \
+                patch.object(paper_ai,'open_in_codex',return_value={'ok':True}) as native:
+            with self.request('open',{'generation':2}) as response:
+                self.assertTrue(json.load(response)['ok'])
+            self.assertEqual(prepare.call_args.args[1:],(PID,2))
+            native.assert_called_once_with(TID)
+
+    def test_compaction_stream_and_usage_persistence(self):
+        usage={'last':{'totalTokens':500},'modelContextWindow':10000}
+        def compact(*_,on_progress,**kwargs):
+            self.assertEqual(kwargs['generation'],1)
+            on_progress({'type':'thread','thread_id':TID})
+            on_progress({'type':'status','stage':'compacting','label':'正在压缩上下文'})
+            on_progress({'type':'usage','usage':usage})
+            return {'compacted':True}
+        with patch.object(paper_ai,'compact_chat',side_effect=compact):
+            with self.request('compact',{'request_id':'compact'}) as response:
+                events=[json.loads(line) for line in response]
+        self.assertTrue(events[-1]['compacted'])
+        from ezread.chat_operations import read_usage
+        self.assertEqual(read_usage(server.LIBRARY,PID,1,TID),usage)
+        self.assertIsNone(read_usage(server.LIBRARY,PID,1,'other'))
 
 
 @unittest.skipUnless(os.name=='nt','Windows protocol dispatch')

@@ -12,4 +12,3 @@ fingerprint = _workflow.fingerprint
 audit_structure = _workflow.audit_structure
 validate_roles = _workflow.validate_roles
 refine = _workflow.refine
-selection_source = _workflow.selection_source

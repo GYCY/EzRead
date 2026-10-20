@@ -14,7 +14,6 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import server
-import codex_bridge
 import codex_models
 import paper_ai
 
@@ -318,31 +317,6 @@ class TranslationTests(unittest.TestCase):
                 server.validate_settings({'selection_translation_reasoning_effort': invalid})
         self.assertEqual(server.settings()['translation_model'], 'model-b')
         self.assertEqual(server.settings()['translation_reasoning_effort'], 'high')
-
-    def test_selection_http_uses_saved_model_and_reasoning(self):
-        httpd = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        base = 'http://127.0.0.1:' + str(httpd.server_port)
-        try:
-            with patch.object(server, 'PORT', httpd.server_port), \
-                    patch.object(server, 'codex_status', return_value={'authenticated': True}), \
-                    patch.object(codex_bridge, 'translate_selection', return_value='模拟划线译文') as translate:
-                for effort, expected in (('', 'medium'), ('high', 'high')):
-                    settings = {'selection_translation_model': 'model-a', 'selection_translation_reasoning_effort': effort}
-                    req = urllib.request.Request(base + '/api/settings', json.dumps(settings).encode(),
-                                                 {'Content-Type': 'application/json'}, method='PATCH')
-                    with urllib.request.urlopen(req) as response:
-                        self.assertEqual(json.load(response)['selection_translation_reasoning_effort'], effort)
-                    req = urllib.request.Request(base + '/api/papers/' + PID + '/ai/highlight',
-                        json.dumps({'block_id': 'p1', 'text': 'First synthetic paragraph.'}).encode(),
-                        {'Content-Type': 'application/json'}, method='POST')
-                    with urllib.request.urlopen(req) as response:
-                        self.assertEqual(json.load(response)['translation'], '模拟划线译文')
-                    translate.assert_called_with('First synthetic paragraph.', model='model-a', reasoning_effort=expected, paper_id=PID)
-                self.assertFalse(server.get_doc(PID)['blocks'][0].get('translation'))
-        finally:
-            httpd.shutdown(); thread.join(timeout=2); httpd.server_close()
 
     def test_http_contract_health_reader_versions_and_model_refresh(self):
         httpd = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)

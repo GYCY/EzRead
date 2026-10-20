@@ -1,7 +1,7 @@
 "use strict";
 
 const paperChatRuntime = { paperId: null, data: null, pending: new Map(), drafts: new Map(), attachments: new Map(), request: 0,
-  width: null, widthLoaded: false, resizeObserver: null };
+  mutating: false, width: null, widthLoaded: false, resizeObserver: null };
 
 function paperChatApplyWidth(width = null, persist = false) {
   const pane = $("#reader-paper-chat"), workspace = pane?.parentElement;
@@ -91,35 +91,40 @@ function paperChatPending(pending) {
 function renderPaperChat() {
   const pane = $("#reader-paper-chat"), data = paperChatRuntime.data, id = paperChatRuntime.paperId;
   if (!pane || !data) return;
-  const current = data.generation === data.current.generation, pending = paperChatRuntime.pending.get(id);
+  const pending = paperChatRuntime.pending.get(id);
   const visiblePending = pending?.generation === data.generation ? pending : null;
   const busy = pending && !pending.failed && !pending.completed;
   const previous = $("#paper-chat-history");
   const scroll = previous?.scrollTop || 0, follow = !previous || previous.scrollHeight - previous.scrollTop - previous.clientHeight < 60;
   const version = el("select", { "aria-label": "论文对话版本", onchange: event => void loadPaperChat(Number(event.target.value)).catch(error => toast(error.message, "error")) },
-    data.generations.map(item => el("option", { value: item.generation }, `第 ${item.generation} 版 · ${item.model || "模型未记录"}`)));
-  version.value = String(data.generation);
+    data.generations.map(item => el("option", { value: item.generation }, `对话 ${item.generation} · ${item.model || "模型未记录"}`)));
+  version.value = String(data.generation); version.disabled = Boolean(busy || paperChatRuntime.mutating);
   const history = el("div", { class: "paper-chat-history", id: "paper-chat-history", "aria-label": "论文对话消息" }, data.messages.map(paperChatMessage));
-  if (visiblePending) history.append(paperChatMessage({ role: "user", text: visiblePending.question, citations: visiblePending.selectedText ? [{ type: "selection" }] : [] }), paperChatPending(visiblePending));
+  if (visiblePending && !visiblePending.compact) history.append(paperChatMessage({ role: "user", text: visiblePending.question, citations: visiblePending.selectedText ? [{ type: "selection" }] : [] }), paperChatPending(visiblePending));
+  if (visiblePending?.compact) history.append(paperChatPending(visiblePending));
   if (!data.messages.length && !visiblePending) history.append(el("p", { class: "paper-chat-empty" }, "围绕论文自由讨论，也可以提问或延伸探索"));
   const input = el("textarea", { id: "paper-chat-input", rows: "3", maxlength: "4000", placeholder: "向论文提问",
-    value: paperChatRuntime.drafts.get(id) || "", disabled: !current || busy, "aria-label": "向论文提问" });
+    value: paperChatRuntime.drafts.get(id) || "", disabled: busy, "aria-label": "向论文提问" });
   input.addEventListener("input", () => paperChatRuntime.drafts.set(id, input.value));
   input.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void sendPaperChat(); }
   });
-  const threadLink = data.thread_id ? button("在 Codex 中打开 ↗", () => void openPaperChatInCodex(), "secondary", "", { class: "paper-chat-native", id: "paper-chat-open-codex", title: "在 Codex 中打开", "aria-label": "在 Codex 中打开" }) : null;
+  const threadLink = button("在 Codex 中打开 ↗", () => void openPaperChatInCodex(), "secondary", "", { class: "paper-chat-native", id: "paper-chat-open-codex", disabled: Boolean(paperChatRuntime.mutating || (busy && !data.thread_id)), title: "在 Codex 中打开", "aria-label": "在 Codex 中打开" });
   pane.replaceChildren(paperChatResizeHandle(), el("div", { class: "paper-chat-heading" }, el("strong", {}, "论文对话"),
-    el("div", { class: "paper-chat-context" }, version), threadLink,
+    el("div", { class: "paper-chat-context" }, version),
+    button("新建对话", () => void newPaperChat(), "secondary", "", { disabled: Boolean(busy || paperChatRuntime.mutating), id: "paper-chat-new" }), threadLink,
     iconButton("close", "收起论文对话", () => closePaperChat())), history,
-    current ? el("div", { class: "paper-chat-compose" },
+    el("div", { class: "paper-chat-compose" },
       paperChatRuntime.attachments.has(id) ? paperChatAttachment(() => {
         paperChatRuntime.attachments.delete(id); renderPaperChat(); $("#paper-chat-input")?.focus();
       }) : null, input,
-      el("div", { class: "paper-chat-compose-footer" }, el("small", {}, "Enter 发送 · Shift+Enter 换行"),
+      el("div", { class: "paper-chat-compose-footer" },
+        el("div", { class: "paper-chat-usage-actions" },
+          el("small", { id: "paper-chat-usage", title: "按 Codex 最近一次上报更新，不是累计消耗；未上报时不估算。" }, paperChatUsage(data.usage)),
+          button("压缩", () => void sendPaperChat(true), "secondary", "", { id: "paper-chat-compact", disabled: Boolean(busy || !data.thread_id), title: "压缩模型上下文，保留聊天记录；可能损失细节" })),
         el("button", { type: "button", class: "button primary paper-chat-send", id: "paper-chat-send",
-          disabled: busy, "aria-label": busy ? "正在回答" : "发送", onclick: () => void sendPaperChat() },
-          busy ? el("span", { class: "paper-chat-spinner", "aria-hidden": "true" }) : icon("arrow")))) : null);
+          disabled: Boolean(busy && (!pending.ready || pending.stopping)), "aria-label": busy ? "停止" : "发送", onclick: () => void (busy ? stopPaperChat() : sendPaperChat()) },
+          busy ? "■" : icon("arrow")))));
   history.scrollTop = follow ? history.scrollHeight : scroll;
   paperChatApplyWidth();
   paperChatRuntime.resizeObserver?.disconnect();
@@ -134,7 +139,7 @@ function updatePaperChatProgress(id) {
   const history = $("#paper-chat-history"), follow = history && history.scrollHeight - history.scrollTop - history.clientHeight < 60;
   const label = $("#paper-chat-status-label"), elapsed = $("#paper-chat-elapsed");
   if (label && label.textContent !== pending.label) label.textContent = pending.label;
-  if (elapsed) elapsed.textContent = `${Math.floor((Date.now() - pending.started) / 1000)} 秒`;
+  if (elapsed) elapsed.textContent = `${pending.stage === "compacting" ? "压缩已用 " : ""}${Math.floor((Date.now() - (pending.stage === "compacting" ? pending.stageStarted || pending.started : pending.started)) / 1000)} 秒`;
   const reasoning = $("#paper-chat-reasoning-live"), answer = $("#paper-chat-answer-live");
   if (reasoning && reasoning.dataset.text !== pending.reasoning) {
     reasoning.dataset.text = pending.reasoning; reasoning.hidden = !pending.reasoning;
@@ -204,43 +209,83 @@ function togglePaperChat() {
 async function openPaperChatInCodex() {
   const id = paperChatRuntime.paperId, generation = paperChatRuntime.data?.generation, target = $("#paper-chat-open-codex");
   if (!id || !generation || target?.disabled) return;
+  paperChatRuntime.mutating = true;
+  renderPaperChat();
   if (target) { target.disabled = true; target.textContent = "正在打开…"; }
   try {
     await api(`/api/papers/${encodeURIComponent(id)}/ai/open`, { method: "POST", body: { generation } });
+    if (paperChatRuntime.paperId === id && state.reader?.id === id) await loadPaperChat(generation);
     toast("已请求 Codex 打开此对话");
   } catch (error) { toast(error.message, "error", 8000); }
-  finally { if (target?.isConnected) { target.disabled = false; target.textContent = "在 Codex 中打开 ↗"; } }
+  finally { paperChatRuntime.mutating = false; if (paperChatRuntime.paperId === id) renderPaperChat(); }
 }
 
-async function sendPaperChat() {
+async function sendPaperChat(compact = false) {
   const input = $("#paper-chat-input"), id = state.reader?.id, data = paperChatRuntime.data;
   const question = input?.value.trim(), existing = paperChatRuntime.pending.get(id);
-  if (!id || !question || !data || data.generation !== data.current.generation || (existing && !existing.failed && !existing.completed)) return;
+  if (!id || (!compact && !question) || !data || paperChatRuntime.mutating || (existing && !existing.failed && !existing.completed)) return;
   const selectedText = paperChatRuntime.attachments.get(id) || "";
-  const pending = { question, selectedText, generation: data.generation, label: "正在发送问题", started: Date.now(), reasoning: "", answer: "", completed: false, failed: false };
-  paperChatRuntime.pending.set(id, pending); paperChatRuntime.drafts.delete(id); paperChatRuntime.attachments.delete(id);
+  const pending = { compact, requestId: crypto.randomUUID(), question: compact ? "" : question, selectedText, generation: data.generation, label: "正在发送问题", started: Date.now(), reasoning: "", answer: "", completed: false, failed: false };
+  paperChatRuntime.pending.set(id, pending); if (!compact) { paperChatRuntime.drafts.delete(id); paperChatRuntime.attachments.delete(id); }
   renderPaperChat();
   const timer = setInterval(() => updatePaperChatProgress(id), 1000);
   try {
-    await apiStream(`/api/papers/${encodeURIComponent(id)}/ai/chat-stream`, { question, selected_text: selectedText }, event => {
-      if (event.type === "status") pending.label = event.label;
+    await apiStream(`/api/papers/${encodeURIComponent(id)}/ai/${compact ? "compact" : "chat-stream"}`, { question, selected_text: compact ? "" : selectedText, request_id: pending.requestId, generation: pending.generation }, event => {
+      if (event.type === "operation") { pending.ready = true; renderPaperChat(); }
+      else if (event.type === "usage" && paperChatRuntime.paperId === id && paperChatRuntime.data?.generation === pending.generation) {
+        paperChatRuntime.data.usage = event.usage;
+        const usage = $("#paper-chat-usage"); if (usage) usage.textContent = paperChatUsage(event.usage);
+      }
+      else if (event.type === "status") { if (event.stage === "compacting" && pending.stage !== "compacting") pending.stageStarted = Date.now(); pending.stage = event.stage; pending.label = event.label; }
       else if (event.type === "reasoning") { pending.reasoning = event.text; pending.label = "正在思考"; }
       else if (event.type === "answer") { pending.answer = event.text; pending.label = "正在生成回答"; }
       else if (event.type === "thread" && paperChatRuntime.paperId === id && paperChatRuntime.data?.generation === pending.generation) {
         paperChatRuntime.data.thread_id = event.thread_id; renderPaperChat();
-      } else if (event.type === "completed") { pending.completed = true; pending.answer = event.answer; pending.label = "回答已完成"; }
+      } else if (event.type === "completed") { pending.completed = true; pending.answer = event.answer; pending.label = event.stopped ? "已停止" : compact ? "上下文已压缩" : "回答已完成"; if (event.unsaved && !compact) { paperChatRuntime.drafts.set(id, question); if (selectedText) paperChatRuntime.attachments.set(id, selectedText); } }
       updatePaperChatProgress(id);
     });
     if (state.reader?.id === id) { await loadPaperChat(paperChatRuntime.data?.generation); renderLibrary(); }
   } catch (error) {
     if (!pending.completed) {
       pending.failed = true; pending.label = `回答未完成：${error.message}`;
-      pending.answer = ""; paperChatRuntime.drafts.set(id, question);
-      if (selectedText) paperChatRuntime.attachments.set(id, selectedText);
+      if (!compact) paperChatRuntime.drafts.set(id, question);
+      if (!compact && selectedText) paperChatRuntime.attachments.set(id, selectedText);
     }
     toast(`论文对话：${error.message}`, "error", 8000);
   } finally {
     clearInterval(timer);
     if (state.reader?.id === id && paperChatRuntime.paperId === id) renderPaperChat();
   }
+}
+
+
+function paperChatUsage(usage) {
+  const used = usage?.last?.totalTokens, limit = usage?.modelContextWindow;
+  if (!Number.isFinite(used)) return "上下文：待上报";
+  const count = new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
+  return Number.isFinite(limit) && limit > 0
+    ? `上下文 ${Math.min(100, Math.round(used / limit * 100))}% · ${count.format(used)}/${count.format(limit)}`
+    : `上下文 ${count.format(used)} tokens · 上限未知`;
+}
+
+async function stopPaperChat() {
+  const id = paperChatRuntime.paperId, pending = paperChatRuntime.pending.get(id);
+  if (!pending?.ready || pending.stopping || pending.completed || pending.failed) return;
+  pending.stopping = true; pending.label = "正在停止…"; renderPaperChat();
+  try { await api(`/api/papers/${encodeURIComponent(id)}/ai/stop`, { method: "POST", body: { request_id: pending.requestId } }); }
+  catch (error) { pending.stopping = false; toast(error.message, "error"); renderPaperChat(); }
+}
+
+async function newPaperChat() {
+  const id = paperChatRuntime.paperId, pending = paperChatRuntime.pending.get(id);
+  if (!id || paperChatRuntime.mutating || (pending && !pending.completed && !pending.failed)) return;
+  paperChatRuntime.mutating = true; renderPaperChat();
+  try {
+    await api(`/api/papers/${encodeURIComponent(id)}/ai/new`, { method: "POST", body: {} });
+    if (state.reader?.id === id) {
+      paperChatRuntime.pending.delete(id); paperChatRuntime.drafts.delete(id); paperChatRuntime.attachments.delete(id);
+      await loadPaperChat(); $("#paper-chat-input")?.focus({ preventScroll: true });
+    }
+  } catch (error) { toast(error.message, "error"); }
+  finally { paperChatRuntime.mutating = false; if (paperChatRuntime.paperId === id) renderPaperChat(); }
 }

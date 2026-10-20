@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 from PIL import Image
-from ezread.chat_pdf import attachment, prepare_pdf
+from ezread.chat_pdf import original_pdf, prepare_pdf
 from test_layout_rules import synthetic_pdf
 
 
@@ -30,9 +30,9 @@ class ChatPDFTests(unittest.TestCase):
             finally:
                 document.close()
             before=source.read_bytes()
-            self.assertEqual(attachment(root,pid,{'filename':'paper.pdf'}),
-                             {'type':'pdf','name':'paper.pdf','available':True})
-            self.assertFalse(attachment(root,'fedcba9876543210',{})['available'])
+            self.assertEqual(original_pdf(root,pid),source.resolve())
+            with self.assertRaises(ValueError):
+                original_pdf(root,'fedcba9876543210')
             pages,images=prepare_pdf(root,pid,root/'rendered')
             self.assertEqual(len(pages),36)
             self.assertEqual(len(images),36)

@@ -61,17 +61,25 @@ def handler_for(app: ApplicationContext):
                 raise ValueError('无效的请求。')
             return value
 
-        def stream_paper_chat(self, pid, doc, data):
+        def stream_paper_chat(self, pid, doc, data, compact=False):
             import paper_ai
             question=data.get('question','')
-            if not isinstance(question,str) or not 1<=len(question.strip())<=4000:
+            if not compact and (not isinstance(question,str) or not 1<=len(question.strip())<=4000):
                 raise ValueError('请输入 1–4000 字的问题。')
+            from . import chat_operations
+            request_id=data.get('request_id') or secrets.token_hex(16)
+            if not isinstance(request_id,str) or not re.fullmatch(r'[a-zA-Z0-9-]{1,80}',request_id):
+                raise ValueError('无效的请求编号。')
             # Reject a duplicate immediately, before sending streaming headers.
             lock=paper_ai.paper_lock(pid)
             if not lock.acquire(blocking=False):
                 self.send_json({'error':'这篇论文正在回答，请等待本轮完成。'},409)
                 return
+            cancellation=None
             try:
+                with app.db() as con:
+                    generation=paper_ai.current(con,pid,data.get('generation'))['generation']
+                cancellation=chat_operations.begin(pid,request_id,app.SHUTDOWN)
                 self.send_response(200)
                 self.send_header('Content-Type','application/x-ndjson; charset=utf-8')
                 self.send_header('Cache-Control','no-store')
@@ -80,20 +88,35 @@ def handler_for(app: ApplicationContext):
                 self.end_headers()
                 self.close_connection=True
                 connected=True
+                active_thread=None
                 def emit(event):
-                    nonlocal connected
+                    nonlocal connected,active_thread
+                    if event.get('type')=='thread':
+                        active_thread=event['thread_id']
+                    if event.get('type')=='usage' and active_thread:
+                        chat_operations.save_usage(app.LIBRARY,pid,generation,active_thread,event['usage'])
                     if not connected: return
                     try:
                         self.wfile.write((json.dumps(event,ensure_ascii=False)+'\n').encode('utf-8'))
                         self.wfile.flush()
                     except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):
                         connected=False
+                        cancellation.local.set()
+                emit({'type':'operation','request_id':request_id})
                 try:
-                    result=paper_ai.ask(app.db,pid,doc,question,on_progress=emit,cancel_event=app.SHUTDOWN,selected_text=data.get('selected_text',''),library=app.LIBRARY)
+                    if compact:
+                        result=paper_ai.compact_chat(app.db,pid,on_progress=emit,cancel_event=cancellation,library=app.LIBRARY,generation=generation)
+                    else:
+                        result=paper_ai.ask(app.db,pid,doc,question,on_progress=emit,cancel_event=cancellation,selected_text=data.get('selected_text',''),library=app.LIBRARY,generation=generation)
                     emit({'type':'completed',**result})
                 except Exception as exc:
-                    emit({'type':'error','error':str(exc),'code':getattr(exc,'code','session')})
+                    if cancellation.is_set():
+                        emit({'type':'completed','stopped':True,'unsaved':True,'answer':''})
+                    else:
+                        emit({'type':'error','error':str(exc),'code':getattr(exc,'code','session')})
             finally:
+                if cancellation is not None:
+                    chat_operations.finish(pid,request_id)
                 lock.release()
 
         def send_file(self, path, attachment=None):
@@ -178,13 +201,13 @@ def handler_for(app: ApplicationContext):
                 elif re.fullmatch(r'/api/papers/[a-f0-9]{16}/ai', path):
                     import paper_ai
                     pid = path.split('/')[-2]
-                    doc = app.get_doc(pid)
+                    app.get_doc(pid)
                     raw_generation = urllib.parse.parse_qs(parts.query).get('generation', [None])[0]
                     generation = int(raw_generation) if raw_generation is not None and raw_generation.isdigit() else None
                     with app.LOCK, app.db() as con:
                         saved = paper_ai.history(con, pid, generation)
-                    from ezread.chat_pdf import attachment
-                    saved['original_pdf'] = attachment(app.LIBRARY, pid, doc)
+                    from .chat_operations import read_usage
+                    saved['usage'] = read_usage(app.LIBRARY,pid,saved['generation'],saved['thread_id'])
                     self.send_json(saved)
                 elif re.fullmatch(r'/api/papers/[a-f0-9]{16}/selection-progress', path):
                     query = urllib.parse.parse_qs(parts.query)
@@ -313,7 +336,7 @@ def handler_for(app: ApplicationContext):
                     self.read_json()
                     self.send_json(app.paper_file_action(*file_match.groups()))
                     return
-                ai_match = re.fullmatch(r'/api/papers/([a-f0-9]{16})/ai/(chat|chat-stream|open|model|highlight)', path)
+                ai_match = re.fullmatch(r'/api/papers/([a-f0-9]{16})/ai/(chat-stream|compact|stop|new|open|model)', path)
                 if ai_match:
                     import paper_ai
                     pid, action = ai_match.groups()
@@ -321,7 +344,21 @@ def handler_for(app: ApplicationContext):
                     data = self.read_json()
                     if not isinstance(data, dict):
                         raise ValueError('请求内容无效。')
-                    if action == 'model':
+                    if action == 'stop':
+                        from .chat_operations import stop
+                        self.send_json({'stopping':stop(pid,data.get('request_id'))})
+                    elif action == 'new':
+                        lock=paper_ai.paper_lock(pid)
+                        if not lock.acquire(blocking=False):
+                            self.send_json({'error':'请先停止当前操作，再新建对话。'},409)
+                            return
+                        try:
+                            with app.LOCK,app.db() as con:
+                                result=paper_ai.new_chat(con,pid)
+                            self.send_json(result)
+                        finally:
+                            lock.release()
+                    elif action == 'model':
                         if set(data) - {'model','reasoning_effort'}:
                             raise ValueError('模型配置包含未知字段。')
                         with paper_ai.paper_lock(pid), app.LOCK, app.db() as con:
@@ -332,31 +369,20 @@ def handler_for(app: ApplicationContext):
                             raise ValueError('打开对话的请求包含未知字段。')
                         with app.LOCK, app.db() as con:
                             saved=paper_ai.history(con,pid,data.get('generation'))
+                        if not saved['thread_id']:
+                            lock=paper_ai.paper_lock(pid)
+                            if not lock.acquire(blocking=False):
+                                self.send_json({'error':'请等待当前操作完成后再打开对话。'},409)
+                                return
+                            try:
+                                saved['thread_id']=paper_ai.prepare_chat_thread(app.db,pid,saved['generation'])
+                            finally:
+                                lock.release()
                         self.send_json(paper_ai.open_in_codex(saved['thread_id']))
-                    elif action in ('chat','chat-stream'):
+                    elif action in ('chat-stream','compact'):
                         if not app.codex_status().get('authenticated'):
                             raise ValueError('请先在官方 Codex 中登录 ChatGPT 账号。')
-                        if action=='chat-stream':
-                            self.stream_paper_chat(pid,doc,data)
-                        else:
-                            result = paper_ai.ask(app.db,pid,doc,data.get('question',''),selected_text=data.get('selected_text',''),library=app.LIBRARY)
-                            self.send_json(result)
-                    else:
-                        import paper_structure
-                        block_id, selected = data.get('block_id'), data.get('text')
-                        source = paper_structure.selection_source(doc, block_id, data.get('source_ids'))
-                        if not isinstance(selected,str) or not 1<=len(selected.strip())<=1200:
-                            raise ValueError('每次请选择不超过 1200 字符的连续正文。')
-                        normalize = lambda s: ' '.join(s.split())
-                        if normalize(selected) not in normalize(source):
-                            raise ValueError('选中文字与该论文段落不一致。')
-                        if not app.codex_status().get('authenticated'):
-                            raise ValueError('请先在官方 Codex 中登录 ChatGPT 账号。')
-                        import codex_models, codex_bridge
-                        settings = app.settings()
-                        config = codex_models.resolve_config(settings['selection_translation_model'], settings['selection_translation_reasoning_effort'])
-                        result = codex_bridge.translate_selection(selected, **config, paper_id=pid)
-                        self.send_json({'translation': result})
+                        self.stream_paper_chat(pid,doc,data,compact=action=='compact')
                     return
                 if path == '/api/import':
                     size = int(self.headers.get('Content-Length', 0))

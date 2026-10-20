@@ -76,14 +76,6 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(result['status'], 'ready')
         self.assertTrue(result['audit']['complete'])
 
-    def test_selection_requires_the_same_untranslated_natural_paragraph(self):
-        doc = copy.deepcopy(self.doc)
-        doc['blocks'][6].pop('translation')
-        doc['reading_structure'] = paper_structure.organize(doc)
-        self.assertIn('measure contact forces', paper_structure.selection_source(doc, 'body1', ['body1', 'body2']))
-        with self.assertRaises(ValueError): paper_structure.selection_source(doc, 'body1', ['body1', 'doi'])
-        with self.assertRaises(ValueError): paper_structure.selection_source(self.doc, 'body1', ['body1', 'body2'])
-
     def test_empty_scan_does_not_invent_abstract_or_authors(self):
         result = paper_structure.organize({'blocks': []})
         self.assertFalse(result['sections'])

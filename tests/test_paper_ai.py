@@ -79,8 +79,98 @@ class PaperAITests(unittest.TestCase):
         self.assertIn('E = 42 MPa',call['prompt'])
         self.assertEqual(len(call['images']),1)
         self.assertTrue(call['images_exist'])
-        self.assertFalse(Path(call['images'][0]).exists(), 'Temporary pages must be cleaned after turn')
+        self.assertTrue(Path(call['images'][0]).exists(), 'Prepared pages persist for reuse')
         self.assertEqual(result['citations'][0]['type'],'pdf')
+
+    def test_followup_reuses_context_without_pdf_or_history_duplication(self):
+        self.ask('First question')
+        with patch('ezread.chat_pdf.prepare_pdf', side_effect=AssertionError('must not render again')):
+            self.ask('Follow-up question')
+        turns=[v for method,v in FakeSession.calls if method=='turn']
+        self.assertEqual(turns[-1]['images'],[])
+        self.assertNotIn('pdf_pages',turns[-1]['prompt'])
+        self.assertNotIn('recent_local_history',turns[-1]['prompt'])
+        self.assertEqual(turns[0]['thread_id'],turns[1]['thread_id'])
+
+    def test_old_conversation_continues_its_own_thread_and_model(self):
+        first=self.ask('First question')
+        with self.db() as con:
+            paper_ai.new_chat(con,PID)
+            con.execute("UPDATE paper_ai_generations SET model='model-b' WHERE generation=2")
+        second=self.ask('New conversation',generation=2)
+        continued=self.ask('Continue old conversation',generation=1)
+        self.assertEqual(continued['thread_id'],first['thread_id'])
+        self.assertNotEqual(continued['thread_id'],second['thread_id'])
+        turn=[v for method,v in FakeSession.calls if method=='turn'][-1]
+        self.assertEqual(turn['config']['model'],'model-a')
+        self.assertEqual(turn['images'],[])
+        with self.db() as con:
+            self.assertEqual(paper_ai.current(con,PID)['generation'],2)
+            self.assertEqual(len(paper_ai.history(con,PID,1)['messages']),4)
+            self.assertEqual(len(paper_ai.history(con,PID,2)['messages']),2)
+
+    def test_open_empty_thread_is_idempotent_and_does_not_send_a_turn(self):
+        tid=paper_ai.prepare_chat_thread(self.db,PID,1)
+        self.assertEqual(paper_ai.prepare_chat_thread(self.db,PID,1),tid)
+        self.assertEqual([method for method,_ in FakeSession.calls],['thread/start'])
+        with self.db() as con:
+            self.assertEqual(paper_ai.history(con,PID)['messages'],[])
+        self.assertEqual(self.ask('First actual question')['thread_id'],tid)
+        self.assertEqual(len([v for m,v in FakeSession.calls if m=='turn'][-1]['images']),1)
+
+    def test_fork_inherits_pdf_receipt_and_missing_thread_resends(self):
+        first=self.ask('First question')
+        original=FakeSession.rpc
+        def busy(session,method,params):
+            if method=='thread/resume':
+                raise paper_ai.SessionError('busy','thread_busy')
+            if method=='thread/fork':
+                return {'thread':{'id':'forked-thread'}}
+            return original(session,method,params)
+        with patch.object(FakeSession,'rpc',busy):
+            second=self.ask('Follow-up')
+        self.assertNotEqual(first['thread_id'],second['thread_id'])
+        self.assertEqual([v for m,v in FakeSession.calls if m=='turn'][-1]['images'],[])
+        def missing(session,method,params):
+            if method=='thread/resume':
+                raise paper_ai.SessionError('missing','missing_thread')
+            return original(session,method,params)
+        with patch.object(FakeSession,'rpc',missing):
+            self.ask('Recover lost session')
+        self.assertEqual(len([v for m,v in FakeSession.calls if m=='turn'][-1]['images']),1)
+
+    def test_failed_first_turn_does_not_mark_pdf_as_ready(self):
+        with patch.object(FakeSession,'turn',side_effect=paper_ai.SessionError('offline')):
+            with self.assertRaises(paper_ai.SessionError):
+                self.ask('First question')
+        self.ask('Retry')
+        turn=[v for method,v in FakeSession.calls if method=='turn'][-1]
+        self.assertEqual(len(turn['images']),1)
+
+    def test_changed_pdf_is_attached_again(self):
+        self.ask('First question')
+        from test_layout_rules import synthetic_pdf
+        synthetic_pdf(self.library/PID/'original.pdf',600,[(40,720,'Updated material E = 55 MPa')])
+        self.ask('Follow-up question')
+        turn=[v for method,v in FakeSession.calls if method=='turn'][-1]
+        self.assertIn('55 MPa',turn['prompt'])
+        self.assertEqual(len(turn['images']),1)
+
+    def test_retries_are_bounded_and_explain_failure(self):
+        session=RealCodexSession.__new__(RealCodexSession)
+        session.web_search=True
+        session.deadline=time.monotonic()+1
+        session.events=queue.Queue()
+        session.rpc=lambda *_: {'turn':{'id':'t'}}
+        for _ in range(4):
+            session.events.put({'method':'error','params':{'threadId':'thread','turnId':'t',
+                'willRetry':True,'error':{'message':'connection timed out'}}})
+        events=[]
+        with self.assertRaisesRegex(paper_ai.SessionError,'多次重试'):
+            session.turn('thread','q',resolve(),paper_ai.ANSWER_SCHEMA,on_progress=events.append)
+        retries=[e for e in events if e.get('stage')=='reconnecting']
+        self.assertEqual(len(retries),3)
+        self.assertIn('第 3 次',retries[-1]['label'])
 
     def test_missing_pdf_never_falls_back_to_selected_blocks(self):
         (self.library/PID/'original.pdf').unlink()
@@ -323,6 +413,69 @@ class PaperAITests(unittest.TestCase):
             RealCodexSession.turn(session,'test-thread','question',
                 {'model':'model-a','reasoning_effort':'medium'},paper_ai.ANSWER_SCHEMA)
         self.assertEqual(raised.exception.code,'quota')
+
+    def test_stopped_answer_is_persisted_as_incomplete(self):
+        with patch.object(FakeSession,'turn',return_value={'answer':'Partial','citations':[],'sources':[],'stopped':True}):
+            result=self.ask('Stop this')
+        self.assertTrue(result['stopped'])
+        with self.db() as con:
+            messages=paper_ai.history(con,PID)['messages']
+        self.assertEqual(messages[-1]['kind'],'stopped')
+        self.assertIn('已停止',messages[-1]['text'])
+        self.assertEqual(messages[-2]['text'],'Stop this')
+
+    def test_compaction_failure_is_not_reported_as_success(self):
+        session=RealCodexSession.__new__(RealCodexSession)
+        session.deadline=time.monotonic()+1
+        session.events=queue.Queue()
+        session.rpc=lambda *_: {}
+        session.events.put({'method':'turn/completed','params':{'threadId':'thread',
+            'turn':{'id':'t','status':'failed','error':{'message':'connection timed out'}}}})
+        with self.assertRaises(paper_ai.SessionError):
+            session.turn('thread','',resolve(),paper_ai.CHAT_SCHEMA,compact=True)
+
+    def test_interrupt_sends_rpc_and_keeps_partial_answer(self):
+        import threading
+        session=RealCodexSession.__new__(RealCodexSession)
+        session.number=0
+        session.deadline=time.monotonic()+1
+        session.events=queue.Queue()
+        session.rpc=lambda *_: {'turn':{'id':'t'}}
+        cancellation=threading.Event()
+        sent=[]
+        session.send=sent.append
+        events=[]
+        def progress(event):
+            events.append(event)
+            if event['type']=='answer': cancellation.set()
+        for method,params in [
+            ('item/agentMessage/delta',{'itemId':'a','delta':'{"answer":"Partial answer'}),
+            ('turn/completed',{'turn':{'id':'t','status':'interrupted'}})]:
+            session.events.put({'method':method,'params':{'threadId':'thread','turnId':'t',**params}})
+        result=session.turn('thread','q',resolve(),paper_ai.CHAT_SCHEMA,cancel_event=cancellation,on_progress=progress)
+        self.assertTrue(result['stopped'])
+        self.assertEqual(result['answer'],'Partial answer')
+        self.assertEqual(sent[0]['method'],'turn/interrupt')
+        self.assertEqual(sent[0]['params'],{'threadId':'thread','turnId':'t'})
+
+    def test_compaction_waits_for_terminal_and_reports_usage_and_auto_progress(self):
+        for compact in (False,True):
+            session=RealCodexSession.__new__(RealCodexSession)
+            session.deadline=time.monotonic()+1
+            session.events=queue.Queue()
+            session.rpc=lambda *_: {} if compact else {'turn':{'id':'t'}}
+            events=[]
+            for method,params in [
+                ('turn/started',{'turn':{'id':'t'}}),
+                ('item/started',{'item':{'type':'contextCompaction'}}),
+                ('thread/tokenUsage/updated',{'tokenUsage':{'last':{'totalTokens':100},'modelContextWindow':1000}}),
+                ('item/completed',{'item':{'type':'contextCompaction'}}),
+                ('turn/completed',{'turn':{'id':'t','status':'completed','items':[{'type':'agentMessage','text':'{"answer":"ok","citations":[]}'}]}})]:
+                session.events.put({'method':method,'params':{'threadId':'thread','turnId':'t',**params}})
+            result=session.turn('thread','q',resolve(),paper_ai.CHAT_SCHEMA,compact=compact,on_progress=events.append)
+            self.assertTrue(any(e.get('stage')=='compacting' for e in events))
+            self.assertTrue(any(e['type']=='usage' for e in events))
+            self.assertTrue(result.get('compacted') if compact else result['answer']=='ok')
 
     def test_app_server_failed_turn_is_reported(self):
         session=RealCodexSession.__new__(RealCodexSession)

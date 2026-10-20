@@ -55,7 +55,10 @@ const edge = process.env.EZREAD_BROWSER || path.join(process.env['PROGRAMFILES(X
       });
       assert.equal(geometry.overflow,'hidden');assert.equal(geometry.outer,0);assert(geometry.history>20);assert(geometry.scrolls);assert(geometry.inputVisible);
     }
-    await page.setViewportSize({width:1440,height:1000});await page.evaluate(()=>closePaperChat());
+    await page.setViewportSize({width:1440,height:1000});
+    await page.evaluate(()=>{paperChatRuntime.data.usage={last:{totalTokens:25000},modelContextWindow:100000};renderPaperChat();});
+    await page.screenshot({path:path.join(root,'work/chat-controls-reader.png')});
+    await page.evaluate(()=>closePaperChat());
     checks.push('reader chat outer scroll disabled, inner history scrolls and composer stays visible at wide, short and narrow sizes');
     const startup = await apiState(), initial = startup.doc;
     assert.equal(startup.preparations.length,1);

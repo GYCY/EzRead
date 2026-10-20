@@ -56,6 +56,8 @@ def import_pdf(app: ApplicationContext, content, filename):
         import paper_ai
         with app.LOCK, app.db() as con:
             paper_ai.ensure(con, pid)
+        from .chat_pdf import prepare_in_background
+        prepare_in_background(app.LIBRARY, pid)
         if doc.get('blocks'):
             app.schedule_structure(pid)
         return app.public_doc(app.get_doc(pid))

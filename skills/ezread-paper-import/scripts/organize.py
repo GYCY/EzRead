@@ -286,20 +286,6 @@ def refine(doc, config, *, runner=None, cancel_event=None):
     return result
 
 
-def selection_source(doc, block_id, source_ids=None):
-    ids = source_ids or [block_id]
-    if not isinstance(ids, list) or not ids or len(ids) > 50 or block_id not in ids or len(set(ids)) != len(ids):
-        raise ValueError('划选原文段落无效。')
-    structure = doc.get('reading_structure') or organize(doc)
-    if len(ids) > 1 and not any(entry['source_ids'] == ids for s in structure['sections'] for entry in s['entries']):
-        raise ValueError('只能在同一自然段内连续划选。')
-    by_id = {b['id']: b for b in doc.get('blocks', [])}
-    selected = [by_id.get(bid) for bid in ids]
-    if any(not b or b.get('translation') or b.get('is_formula') or b.get('kind') == 'reference' for b in selected):
-        raise ValueError('只能在右侧尚未翻译的英文正文中划线。')
-    return ' '.join(b.get('text', '') for b in selected)
-
-
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Organize an extracted EzRead document JSON without rewriting source blocks.')

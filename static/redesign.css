@@ -1364,15 +1364,6 @@ dialog::backdrop {
   font-size: 0.75rem;
   white-space: nowrap;
 }
-.reader-paper-chat > select {
-  width: 100%;
-  min-height: 2.2rem;
-  padding: 0.35rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--field-bg);
-  color: var(--text);
-}
 .paper-chat-history {
   flex: 1;
   min-height: 0;
@@ -1440,7 +1431,7 @@ dialog::backdrop {
   border-color: var(--green);
   box-shadow: 0 0 0 1px var(--green);
 }
-.paper-chat-heading, .reader-paper-chat > .app-select, .paper-chat-compose { flex-shrink: 0; }
+.paper-chat-heading, .paper-chat-compose { flex-shrink: 0; }
 .paper-chat-native { border: 0; padding: 0; background: transparent; color: var(--green); cursor: pointer; }
 .paper-chat-compose-footer { display: flex; align-items: center; justify-content: space-between; gap: .5rem; width: 100%; }
 .paper-chat-compose-footer small { color: var(--muted); font-size: .65rem; }
@@ -1515,7 +1506,6 @@ dialog::backdrop {
     border-left: 0;
     border-top: 1px solid var(--line);
   }
-  .reader-paper-chat > .app-select { margin: 0 !important; }
   .paper-chat-resize { display: none; }
   .paper-chat-compose { flex-direction: row; align-items: flex-end; gap: .5rem; padding: .35rem .45rem; }
   .paper-chat-compose textarea { flex: 1; width: auto; height: 2.25rem; min-height: 2.25rem; max-height: 2.25rem; }

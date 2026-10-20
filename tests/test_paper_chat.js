@@ -28,7 +28,7 @@ async function pendingTests() {
     state: { reader: { id: "paper-a" }, papers: [] },
     $: selector => selector === "#paper-chat-input" ? input : null,
     setInterval: fn => { timers.set(1, fn); return 1; }, clearInterval: id => timers.delete(id),
-    Date, toast: text => toasts.push(text), renderLibrary() {},
+    crypto: require("node:crypto").webcrypto, Date, toast: text => toasts.push(text), renderLibrary() {},
     apiStream: (url, data, callback) => { calls.push({ url, data }); onEvent = callback; return new Promise((ok, bad) => { resolve = ok; reject = bad; }); },
   });
   vm.runInContext(source("paper-chat.js"), context);
@@ -48,7 +48,7 @@ async function pendingTests() {
   context.state.reader = { id: "paper-b" };
   reject(Error("network disconnected")); await run;
   assert.equal(vm.runInContext("paperChatRuntime.attachments.get('paper-a')", context), "引用正文");
-  assert.equal(snapshot().failed, true); assert.equal(snapshot().answer, "");
+  assert.equal(snapshot().failed, true); assert.equal(snapshot().answer, "partial");
   assert.equal(vm.runInContext("paperChatRuntime.drafts.get('paper-a')", context), "实验结果？");
   assert.equal(timers.size, 0);
   context.state.reader = { id: "paper-a" };
