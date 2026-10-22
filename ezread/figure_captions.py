@@ -1,5 +1,6 @@
 """PDF-grounded figure-number ledger, independent of manually cropped regions."""
 import copy
+from difflib import SequenceMatcher
 import re
 import unicodedata
 
@@ -8,6 +9,32 @@ START = re.compile(r'^(?:Figure|Fig\.?|图)\s*(\d+)(?:\s*[.:：]\s*|\s+(?=[A-Z(]
 
 def canonical(text):
     return re.sub(r'[\s\-\u00ad]', '', unicodedata.normalize('NFKC', text))
+
+
+def reference_continuation(lead, lines):
+    """A line-wrapped body reference is not a caption heading."""
+    previous = [line for line in lines if line['bbox'][1] < lead['bbox'][1]
+                and line.get('_column') == lead.get('_column')
+                and abs(line['bbox'][0] - lead['bbox'][0]) <= lead['size']
+                and abs(line['size'] - lead['size']) <= .5
+                and -.5 * lead['size'] <= lead['bbox'][1] - line['bbox'][3] <= lead['size'] * .9]
+    if not previous:
+        return False
+    line = max(previous, key=lambda item: item['bbox'][1])
+    return bool(re.search(r'\b(?:in|see|of|to|from|and|as|shown|depicted|illustrated)\s*$', line['text'], re.I))
+
+
+def matching_sources(entry, blocks):
+    """Recover old ledger links only when text and PDF location agree uniquely."""
+    exact = [b for b in blocks if b.get('page') == entry.get('page') and b.get('bbox')
+             and abs(b['bbox'][0] - entry['bbox'][0]) < .015
+             and abs(b['bbox'][1] - entry['bbox'][1]) < .008
+             and (match := START.match(b.get('text', ''))) and int(match[1]) == entry['number']
+             and SequenceMatcher(None, canonical(b['text']), canonical(entry['text']), autojunk=False).ratio() >= .85]
+    if len(exact) == 1:
+        return exact
+    ids = set(entry.get('source_ids', []))
+    return [b for b in blocks if b['id'] in ids]
 
 
 def scan(doc, path):
@@ -20,7 +47,7 @@ def scan(doc, path):
             lines = pdf_tools._lines(page)
             for lead in lines:
                 match = START.match(lead['text'])
-                if not match:
+                if not match or reference_continuation(lead, lines):
                     continue
                 figure = int(match[1])
                 if not 1 <= figure <= 500:
@@ -28,7 +55,9 @@ def scan(doc, path):
                 group = [lead]
                 end = lead['bbox'][3]
                 candidates = sorted((line for line in lines if line['bbox'][1] > lead['bbox'][1]
-                    and line.get('_column') == lead.get('_column')
+                    and line['size'] >= lead['size'] * .8
+                    and (line.get('_column') == lead.get('_column') or (lead.get('_column') == 'span'
+                         and line['bbox'][2] <= lead['bbox'][2] + page.width * .015))
                     and abs(line['bbox'][0] - lead['bbox'][0]) <= page.width * .015), key=lambda line: line['bbox'][1])
                 for line in candidates:
                     if (line['bbox'][1] - end > lead['size'] * .9 or line['size'] > lead['size'] * 1.08
@@ -36,7 +65,17 @@ def scan(doc, path):
                         break
                     group.append(line)
                     end = max(end, line['bbox'][3])
-                text = '\n'.join(line['text'] for line in group)
+                # Spanning rows can leave superscripts in a separate column bucket.
+                texts = []
+                for line in group:
+                    extras = [item for item in lines if item not in group and item['size'] < line['size'] * .8
+                              and len(item['text'].strip()) <= 3
+                              and item['bbox'][0] >= line['bbox'][0] and item['bbox'][2] <= line['bbox'][2]
+                              and item['bbox'][1] >= line['bbox'][1] - line['size'] * .3
+                              and item['bbox'][3] <= line['bbox'][3] + line['size'] * .1]
+                    chars = line.get('chars', []) + [c for item in extras for c in item.get('chars', [])]
+                    texts.append(pdf_tools._line_text(chars) if extras and chars else line['text'])
+                text = '\n'.join(texts)
                 bbox = [min(l['bbox'][0] for l in group) / page.width, lead['bbox'][1] / page.height,
                         max(l['bbox'][2] for l in group) / page.width, end / page.height]
                 source_ids = [b['id'] for b in doc.get('blocks', []) if b.get('page') == number
@@ -55,14 +94,14 @@ def scan(doc, path):
             continue
         entry = matches[0]
         previous = old.get(figure, {})
-        if previous.get('source_hash') == entry['source_hash'] and previous.get('translation'):
-            entry.update(translation=previous['translation'], status='translated')
-        else:
-            sources = [b for b in doc.get('blocks', []) if b['id'] in entry['source_ids']]
-            sources.sort(key=lambda b: (b['bbox'][1], b['bbox'][0]))
-            if (sources and all(b.get('translation') and not b.get('text_override') for b in sources)
-                    and canonical(''.join(b['text'] for b in sources)) == canonical(entry['text'])):
+        sources = matching_sources(entry, doc.get('blocks', []))
+        sources.sort(key=lambda b: (b['bbox'][1], b['bbox'][0]))
+        if sources and canonical(''.join(b['text'] for b in sources)) == canonical(entry['text']):
+            entry['source_ids'] = [b['id'] for b in sources]
+            if all(b.get('translation') for b in sources):
                 entry.update(translation='\n'.join(b['translation'] for b in sources), status='translated')
+        if not entry.get('translation') and previous.get('source_hash') == entry['source_hash'] and previous.get('translation'):
+            entry.update(translation=previous['translation'], status='translated')
         entries.append(entry)
     return entries
 
@@ -119,8 +158,17 @@ def display(doc, blocks):
     for entry in doc.get('figure_captions', []):
         if not entry.get('text'):
             continue
+        sources = matching_sources(entry, doc.get('blocks', []))
+        # A complete existing caption is already the editable/annotatable display node.
+        # This also heals older ledgers containing truncated or superscript-damaged text.
+        if (len(sources) == 1 and sources[0].get('translation')
+                and len(canonical(sources[0]['text'])) >= len(canonical(entry['text'])) and any(
+                b['id'] == sources[0]['id'] and not b.get('formula_continuation')
+                and not b.get('region_retained') and not b.get('source_region_kind') for b in blocks)):
+            continue
+        source_ids = {b['id'] for b in sources}
         for block in blocks:
-            if block['id'] in entry.get('source_ids', []):
+            if block['id'] in source_ids:
                 if block.get('note') or block.get('text_override') or block.get('translation_manually_edited') or any(
                         r.get('block_id') == block['id'] for a in doc.get('text_annotations', []) for r in a.get('ranges', [])):
                     block['region_retained'] = True
