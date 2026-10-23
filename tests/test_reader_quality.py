@@ -90,6 +90,33 @@ class ReaderQualityTests(unittest.TestCase):
             terminology.generate(self.doc, CONFIG, event)
         model.assert_not_called()
 
+    def test_generation_reserves_capacity_for_late_batches_at_the_ledger_limit(self):
+        existing = [{**self.entry, 'source': f'Manual term {i}'} for i in range(498)]
+        self.doc['terminology'] = {'revision': 1, 'entries': existing, 'status': 'ready'}
+        self.doc['blocks'].append({'id': 'late', 'page': 9, 'text': 'padding ' * 3000 + 'late definition'})
+        limits, visited = [], []
+        def model(instruction, payload, schema, config, cancel_event):
+            limit = schema['properties']['entries']['maxItems']
+            self.assertEqual(limit, payload['max_new_entries'])
+            limits.append(limit)
+            visited.extend(b['text'] for b in payload['blocks'])
+            return {'entries': [{**self.entry, 'source': f'New concept {len(limits)}-{i}'} for i in range(limit)]}
+        with patch.object(paper_ai, 'reader_json', side_effect=model):
+            entries = terminology.generate(self.doc, CONFIG)
+        self.assertEqual(len(entries), 500)
+        self.assertEqual(entries[:498], existing)
+        self.assertIn('late definition', ''.join(visited))
+        self.assertGreater(limits[-1], 0)
+        self.assertEqual(self.doc['terminology']['entries'], existing)
+
+    def test_generation_rejects_excess_output_without_truncating_or_overwriting(self):
+        before = copy.deepcopy(self.doc)
+        oversized = [{**self.entry, 'source': f'Concept {i}'} for i in range(81)]
+        with patch.object(paper_ai, 'reader_json', return_value={'entries': oversized}), \
+             self.assertRaisesRegex(ValueError, '本批数量限制'):
+            terminology.generate(self.doc, CONFIG)
+        self.assertEqual(self.doc, before)
+
     def test_matching_tolerates_typography_and_plurals_but_not_other_terms(self):
         for term, source in [('soft polyhedral network', 'Soft\u2011polyhedral networks'),
                              ('tactile sensor', 'tactile\n  sensors'),

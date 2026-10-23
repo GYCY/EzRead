@@ -245,7 +245,9 @@ class CodexSession:
                 raw=str(response['error'].get('message',''))
                 if 'already has an active writer' in raw.lower():
                     raise SessionError('该 Codex 对话正被另一个连接占用，请结束另一处对话后重试。','thread_busy')
-                if re.search(r'not found|no such|unknown thread|rollout.*missing',raw,re.I):
+                if method in ('thread/resume','thread/fork') and re.search(
+                        r'no rollout found|rollout.*(?:missing|not found)|(?:thread|session).*not found|'
+                        r'not found.*(?:thread|session)|no such.*(?:thread|session)|unknown thread',raw,re.I):
                     raise SessionError('本机找不到原 Codex 会话。','missing_thread')
                 mapped=codex_bridge._classify_error(raw)
                 raise SessionError(str(mapped),mapped.code)

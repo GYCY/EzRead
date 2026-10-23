@@ -3,7 +3,13 @@ Dim shell, fs, root, runtime, command
 Set shell = CreateObject("WScript.Shell")
 Set fs = CreateObject("Scripting.FileSystemObject")
 root = fs.GetParentFolderName(WScript.ScriptFullName)
-runtime = shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+runtime = fs.BuildPath(root, ".venv\Scripts\pythonw.exe")
+If Not fs.FileExists(runtime) Then
+  runtime = fs.BuildPath(root, ".venv\Scripts\python.exe")
+End If
+If Not fs.FileExists(runtime) Then
+  runtime = shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+End If
 If Not fs.FileExists(runtime) Then
   runtime = shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
 End If

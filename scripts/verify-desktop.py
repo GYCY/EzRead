@@ -8,6 +8,7 @@ import functools
 import argparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mimetypes
 import os
 from pathlib import Path
 import subprocess
@@ -19,9 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Handler(SimpleHTTPRequestHandler):
+    mime_types = mimetypes.MimeTypes()
     paper_count = 5
     varied_cards = False
     def log_message(self, *args): pass
+
+    def guess_type(self, path):
+        # Match production: desktop verification must not use registry MIME overrides.
+        return self.mime_types.guess_type(str(path))[0] or 'application/octet-stream'
 
     def do_GET(self):
         name = self.path.split('?', 1)[0]
@@ -92,6 +98,11 @@ def main():
                 if cycle == 0:
                     time.sleep(.7)
                     duplicate = subprocess.run(command, cwd=ROOT, creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
+                    deadline = time.monotonic() + 15
+                    while duplicate.returncode == 3 and time.monotonic() < deadline:
+                        # A cold WebView2 startup explicitly defers open requests.
+                        time.sleep(.1)
+                        duplicate = subprocess.run(command, cwd=ROOT, creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
                     assert duplicate.returncode == 0, 'Duplicate startup should activate the existing native window.'
                 try:
                     code = process.wait(timeout=70)

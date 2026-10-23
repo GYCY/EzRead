@@ -4,6 +4,7 @@ from .context import ApplicationContext
 from . import journal_catalogue
 import contextlib
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -21,6 +22,10 @@ from http.server import BaseHTTPRequestHandler
 
 
 def handler_for(app: ApplicationContext):
+    # Use Python's built-in types, not Windows registry file associations.
+    # A local .js -> text/plain association otherwise blocks scripts with nosniff.
+    mime_types = mimetypes.MimeTypes()
+
     class Handler(BaseHTTPRequestHandler):
         server_version = f'EzRead/{app.VERSION}'
 
@@ -120,12 +125,11 @@ def handler_for(app: ApplicationContext):
                 lock.release()
 
         def send_file(self, path, attachment=None):
-            import mimetypes
             if not path.is_file():
                 self.send_json({'error': '文件不存在。'}, 404)
                 return
             self.send_response(200)
-            self.send_header('Content-Type', mimetypes.guess_type(path.name)[0] or 'application/octet-stream')
+            self.send_header('Content-Type', mime_types.guess_type(path.name)[0] or 'application/octet-stream')
             self.send_header('Content-Length', str(path.stat().st_size))
             self.send_header('Cache-Control', 'no-cache')
             self.send_header('X-Content-Type-Options', 'nosniff')

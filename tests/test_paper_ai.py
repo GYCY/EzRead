@@ -280,6 +280,33 @@ class PaperAITests(unittest.TestCase):
         self.assertEqual(caught.exception.code,'thread_busy')
         self.assertIn('占用',str(caught.exception))
 
+    def test_unmaterialized_thread_is_recreated_without_a_model_turn(self):
+        session=RealCodexSession.__new__(RealCodexSession)
+        session.number=0
+        session.deadline=time.monotonic()+1
+        session.web_search=True
+        session.temp=type('Temp',(),{'name':str(self.root)})()
+        calls=[]
+        session.send=calls.append
+        session.responses=queue.Queue()
+        session.responses.put({'id':1,'error':{'message':'no rollout found for thread id empty-thread'}})
+        session.responses.put({'id':2,'result':{'thread':{'id':'replacement-thread'}}})
+        thread=paper_ai._start_or_resume(session,'empty-thread',resolve(),paper_ai.CHAT_BASE,'{}')
+        self.assertEqual(thread,'replacement-thread')
+        self.assertEqual([c['method'] for c in calls],['thread/resume','thread/start'])
+        self.assertEqual(calls[1]['params']['config']['web_search'],'live')
+
+    def test_missing_model_is_not_misidentified_as_a_missing_thread(self):
+        session=RealCodexSession.__new__(RealCodexSession)
+        session.number=0
+        session.deadline=time.monotonic()+1
+        session.send=lambda _:None
+        session.responses=queue.Queue()
+        session.responses.put({'id':1,'error':{'message':'model not found'}})
+        with self.assertRaises(paper_ai.SessionError) as caught:
+            session.rpc('thread/resume',{})
+        self.assertNotEqual(caught.exception.code,'missing_thread')
+
     def test_selection_attachment_is_prompt_context_and_saved_separately(self):
         text='Selected full text with a newline\n第二行'
         self.ask('Explain this',selected_text=text)
